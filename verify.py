@@ -25,7 +25,8 @@ KEY_ENV = '/vol2/@apphome/hermes-agent/data/.env'
 KEY_NAME = 'CUSTOM_UMV4M5OPLH7KI_API_KEY'
 ENGINE = 'http://127.0.0.1:8080/v1'
 MODEL = 'qwen3.8-flash-next-iq3_s'
-PROD_PORT = '9119'
+PROD_PORT = '9119'  # 遗留：hermes-si fpk 生产实例端口（此 NAS 未装 hermes-si 时不存在）
+PROD_PORTS_LIVE = ('9219', '19119')  # 实机在跑的生产 dashboard（自身 + trim.hermes），断言不许被 harness 波及
 FAILS = []
 
 def ok(tag, cond, detail=''):
@@ -188,7 +189,7 @@ def tier1():
     sim_stop()
     time.sleep(3)
     ok('L1.stop+status-3', sim_status() == 3 and not port_up(port))
-    ok('L1.prod-untouched', port_up(PROD_PORT))
+    ok('L1.prod-untouched', all(port_up(p) for p in PROD_PORTS_LIVE), 'live prod dashboards alive')
     (SIM / 'port').write_text(str(port))
 
 # ---------- bridge + CDP ----------
@@ -450,7 +451,7 @@ def tier3():
     srv.close()
     sim_stop()
     time.sleep(3)
-    ok('L3.prod-untouched', port_up(PROD_PORT))
+    ok('L3.prod-untouched', all(port_up(p) for p in PROD_PORTS_LIVE), 'live prod dashboards alive')
 
 # ---------- L4 ----------
 def tier4():

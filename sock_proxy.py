@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unix-socket -> TCP proxy for the fnOS unified gateway, fronting the Hermes SI dashboard.
+"""Unix-socket -> TCP proxy for the fnOS unified gateway, fronting the Hermes FNOS dashboard.
 
 The fnOS gateway forwards /app/<prefix>/... WITHOUT stripping and passes the
 browser's Host through. Unlike the Strata port, hermes' own FastAPI backend
