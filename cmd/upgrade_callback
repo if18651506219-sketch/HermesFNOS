@@ -1,0 +1,9 @@
+#!/bin/bash
+
+### This script is called after the user upgrades the application.
+### Re-provision the engine key (idempotent — same logic as install_callback).
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+bash "${DIR}/install_callback"
+
+exit 0

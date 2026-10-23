@@ -1,0 +1,225 @@
+#!/bin/bash
+# Hermes SI (hermes-agent v0.22.3) fpk lifecycle: native web dashboard behind
+# the fnOS unified gateway (unix socket + prefix/path-rewriting proxy).
+# The dashboard is the UPSTREAM UI (hermes dashboard --skip-build); no frontend
+# modifications. Runtime: bundled python3.14 + packaged venv + packaged source.
+
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+DASH_PID_FILE="${TRIM_PKGVAR}/dash.pid"
+PROXY_PID_FILE="${TRIM_PKGVAR}/proxy.pid"
+SOCK_PATH="${TRIM_APPDEST}/hermes-si.sock"
+HTTP_PORT_FILE="${TRIM_PKGVAR}/http_port"
+APP_HOME="${TRIM_PKGHOME}/data"
+HERMES_HOME_DIR="${APP_HOME}/hermes-home"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+check_process() {
+    local pid=$1
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+pid_of() {
+    local f=$1
+    if [ -f "$f" ]; then
+        head -n 1 "$f" | tr -d '[:space:]'
+    fi
+}
+
+clean_pidfile() {
+    local f=$1
+    if [ -f "$f" ]; then
+        local p=$(pid_of "$f")
+        if ! check_process "$p"; then
+            rm -f "$f"
+        fi
+    fi
+}
+
+running() {
+    clean_pidfile "${DASH_PID_FILE}"
+    clean_pidfile "${PROXY_PID_FILE}"
+    [ -f "${DASH_PID_FILE}" ] && [ -f "${PROXY_PID_FILE}" ]
+}
+
+pick_port() {
+    # default hermes dashboard port is 9119; take that range but dodge any
+    # pre-existing listener (e.g. a dev dashboard started manually).
+    for p in 9119 9120 9121 9122 9123; do
+        if ! ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}\$"; then
+            echo "$p"
+            return 0
+        fi
+    done
+    echo 9119
+}
+
+find_node() {
+    # TUI runtime for the in-browser chat tab (hermes_cli/tui_dist/entry.js).
+    # Prefer the nodejs fpk when installed, then fnOS' system node.
+    if [ -x /var/apps/nodejs_v24/target/bin/node ]; then
+        echo /var/apps/nodejs_v24/target/bin/node
+        return 0
+    fi
+    if [ -x /usr/bin/node ]; then
+        echo /usr/bin/node
+        return 0
+    fi
+    echo ""
+}
+
+seed_config() {
+    # First-run: point the agent at the resident local OpenAI-compatible
+    # engine on 127.0.0.1:8080 (trim.hermes Strata worker / any llama.cpp-style
+    # server). Model name is read live from /v1/models when reachable.
+    # Everything stays user-editable afterwards through the dashboard Settings.
+    if [ ! -f "${HERMES_HOME_DIR}/config.yaml" ]; then
+        local model="" base=""
+        base=$(curl -sf --max-time 2 http://127.0.0.1:8080/health 2>/dev/null)
+        if [ -n "$base" ]; then
+            model=$(echo "$base" | sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        fi
+        cat > "${HERMES_HOME_DIR}/config.yaml" <<EOF
+model: ${model:-local}
+provider: custom
+base_url: http://127.0.0.1:8080/v1
+EOF
+        log_msg "seeded config.yaml (model=${model:-local})"
+    fi
+}
+
+seed_persona() {
+    # First-run: deploy bundled SOUL.md / AGENTS.md / skills (fnOS knowledge +
+    # trim-cli) into HERMES_HOME, same as the official installer seeds prompts.
+    # Only files missing on disk are copied — user edits survive upgrades.
+    local seed="${TRIM_APPDEST}/seeds"
+    [ -d "$seed" ] || return 0
+    for f in SOUL.md AGENTS.md; do
+        if [ -f "$seed/$f" ] && [ ! -f "${HERMES_HOME_DIR}/$f" ]; then
+            cp -f "$seed/$f" "${HERMES_HOME_DIR}/$f"
+        fi
+    done
+    if [ -d "$seed/skills" ] && [ ! -d "${HERMES_HOME_DIR}/skills" ]; then
+        cp -r "$seed/skills" "${HERMES_HOME_DIR}/skills" 2>/dev/null || true
+    fi
+}
+
+start_process() {
+    if running; then
+        return 0
+    fi
+    log_msg "Starting hermes-si dashboard ..."
+
+    # reap orphans from earlier starts/upgrades: anything still holding our
+    # socket/port but absent from our pidfiles would hang the gateway.
+    pkill -TERM -f "sock_proxy.py ${SOCK_PATH}" 2>/dev/null || true
+    pkill -TERM -f "${TRIM_APPDEST}/venv/bin/python3.14 -m hermes_cli.main dashboard" 2>/dev/null || true
+    sleep 1
+
+    mkdir -p "${HERMES_HOME_DIR}" "${APP_HOME}/logs" "$(dirname "${SOCK_PATH}")"
+    seed_config
+    seed_persona
+
+    local port=$(cat "${HTTP_PORT_FILE}" 2>/dev/null)
+    if [ -z "${port}" ] || ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
+        port=$(pick_port)
+        printf "%s" "${port}" > "${HTTP_PORT_FILE}"
+    fi
+
+    local node=$(find_node)
+
+    # Upstream-native launch: python3.14 + packaged venv site-packages + the
+    # packaged source tree, `hermes dashboard --skip-build` (pre-built web_dist
+    # and tui_dist ship inside src/hermes_cli/). Loopback only; the gateway
+    # unix socket is the sole way in.
+    export HERMES_HOME="${HERMES_HOME_DIR}"
+    export HOME="${HERMES_HOME_DIR}"
+    export PYTHONPATH="${TRIM_APPDEST}/venv/lib/python3.14/site-packages:${TRIM_APPDEST}/src"
+    export PATH="${TRIM_APPDEST}/venv/bin:${PATH}"
+    if [ -n "${node}" ]; then
+        export HERMES_NODE="${node}"
+    fi
+    # engine key for the 8080 worker (written by install_callback when readable)
+    if [ -f "${APP_HOME}/engine_key" ]; then
+        export OPENAI_API_KEY="***/bin/123"
+    fi
+
+    ( cd "${TRIM_APPDEST}/src" && \
+      exec "${TRIM_APPDEST}/python314/bin/python3.14" -m hermes_cli.main dashboard \
+        --skip-build --no-open --host 127.0.0.1 --port "${port}" >> "${LOG_FILE}" 2>&1 ) &
+    printf "%s" "$!" > "${DASH_PID_FILE}"
+
+    # wait for the dashboard to bind, then attach the gateway unix socket
+    local ready=0
+    for i in $(seq 1 40); do
+        if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
+            ready=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "${ready}" != "1" ]; then
+        log_msg "dashboard did not bind port ${port} in 40s"
+    fi
+
+    ( exec /usr/bin/python3 \
+        "${TRIM_APPDEST}/sock_proxy.py" "${SOCK_PATH}" "${port}" "/app/hermes-si" >> "${LOG_FILE}" 2>&1 ) &
+    printf "%s" "$!" > "${PROXY_PID_FILE}"
+
+    printf "%s" "$$" > "${PID_FILE}"
+    return 0
+}
+
+stop_process() {
+    log_msg "Stopping hermes-si ..."
+    for f in "${DASH_PID_FILE}" "${PROXY_PID_FILE}"; do
+        local p=$(pid_of "$f")
+        if check_process "$p"; then
+            kill -TERM "${p}" 2>/dev/null
+            local count=0
+            while check_process "${p}" && [ $count -lt 15 ]; do
+                sleep 1
+                count=$((count + 1))
+            done
+            check_process "${p}" && kill -KILL "${p}" 2>/dev/null
+        fi
+        rm -f "$f"
+    done
+    # TUI chat tab spawns node children under the dashboard; sweep by our paths
+    pkill -TERM -f "${TRIM_APPDEST}/src" 2>/dev/null
+    pkill -TERM -f "hermes-si.sock" 2>/dev/null
+    rm -f "${SOCK_PATH}" "${PID_FILE}"
+    return 0
+}
+
+status() {
+    if running; then
+        return 0
+    fi
+    return 1
+}
+
+case $1 in
+start)
+    start_process
+    ;;
+stop)
+    stop_process
+    ;;
+status)
+    if status; then
+        exit 0
+    else
+        exit 3
+    fi
+    ;;
+*)
+    exit 1
+    ;;
+esac
