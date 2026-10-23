@@ -1,0 +1,18 @@
+{
+    ".url": {
+        "hermes-si.Application": {
+            "title": "Hermes FNOS",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "gatewaySocket": "hermes-si.sock",
+            "gatewayPrefix": "/app/hermes-si",
+            "port": "",
+            "url": "/app/hermes-si/",
+            "allUsers": false,
+            "control": {
+                "accessPerm": "readonly"
+            }
+        }
+    }
+}

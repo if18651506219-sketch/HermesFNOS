@@ -142,7 +142,10 @@ def log_lines(port, token, limit=500):
 def tier0():
     ver = re.search(r'^version\s*=\s*(\S+)', sh(['tar', '-xOf', str(FPK), 'manifest']).stdout, re.M).group(1)
     ok('L0.manifest-version', bool(ver), ver)
-    sh(['tar', '-xzf', str(FPK), '-C', str(SIM)]) if not (SIM / 'app.tgz').is_file() else None
+    stale = (not (SIM / 'app.tgz').is_file()) or (SIM / 'app.tgz').stat().st_mtime < FPK.stat().st_mtime
+    if stale:
+        sh(['rm', '-rf', str(SIM)])
+        sh(['tar', '-xzf', str(FPK), '-C', str(SIM)])
     links = sh(['tar', '-tzf', str(SIM / 'app.tgz')]).stdout
     n_link = sum(1 for l in links.splitlines() if l.count(':') > 1)
     ok('L0.zero-inner-links', n_link == 0, f'link-entries={n_link}')
@@ -161,6 +164,11 @@ def tier0():
        and bool(stamp.get('baseVersion')) and bool(stamp.get('commit'))
        and set(str(stamp.get('commit'))) != {'0'},
        f"base={stamp.get('baseVersion')} display={stamp.get('displayVersion')}")
+    uicfgs = [p for p in SIM.rglob('config') if p.parent.name == 'ui']
+    uitxts = [p.read_text(errors='ignore') for p in uicfgs]
+    ok('L0.ui-title', len(uicfgs) >= 1 and all('"Hermes FNOS"' in t for t in uitxts)
+       and not any('Hermes SI' in t for t in uitxts),
+       f'ui/config files={len(uicfgs)}')
     idx = next((t0 / 'src' / 'hermes_cli' / 'web_dist' / 'assets').glob('index-*.js'), None)
     body = idx.read_text(errors='ignore') if idx else ''
     ok('L0.preload-prefix-fix', body.count('modulepreload') > 0 and 'return`/`+' not in body,
