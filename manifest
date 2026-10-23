@@ -1,5 +1,5 @@
 appname               = hermes-si
-version               = 0.22.4.5
+version               = 0.22.4.6
 display_name          = Hermes FNOS
 desc                  = "Hermes Agent 官方 Web 控制台（fnOS 原生 fpk 版），内核版本与官方同步。保持 Nous Research 官方 dashboard 界面零改动，支持多模型供应商、消息网关（微信/QQ/飞书/钉钉/Telegram 等）、定时任务、跨会话记忆、技能系统与 MCP 扩展。<br/><br/><strong>核心能力：</strong><br/>• 官方原生界面：聊天、模型、渠道、技能、日志、文件、Cron、MCP 全页面<br/>• 自带 Python 运行时与全部依赖，离线安装<br/>• 内置 fnOS 技能库（trim-cli 等），开箱即用管理飞牛 NAS<br/>• 自升级已封印，升级只走飞牛应用中心<br/><br/><strong>免责声明：</strong>本应用为社区移植封装，不对上游 Hermes Agent 软件本身的安全性、稳定性作任何保证，使用过程中产生的风险由用户自行承担。"
 platform              = x86

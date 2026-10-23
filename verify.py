@@ -22,7 +22,7 @@ SIM = HERE / 'sim'
 FPK = HERE / 'pkg' / 'hermes-si.fpk'
 PREFIX = '/app/hermes-si'
 KEY_ENV = '/vol2/@apphome/hermes-agent/data/.env'
-KEY_NAME = os.environ.get('HERMES_TEST_KEY_ENV', '')  # name of the env var holding the test provider key
+KEY_NAME = 'CUSTOM_UMV4M5OPLH7KI_API_KEY'
 ENGINE = 'http://127.0.0.1:8080/v1'
 MODEL = 'qwen3.8-flash-next-iq3_s'
 PROD_PORT = '9119'
@@ -152,6 +152,15 @@ def tier0():
         t0 = SIM / 'target'
     pth = list((t0 / 'python314' / 'lib').rglob('hermes_si_venv.pth'))
     ok('L0.pth-patch-present', bool(pth))
+    stamp_f = t0 / 'src' / 'install-stamp.json'
+    try:
+        stamp = json.loads(stamp_f.read_text())
+    except Exception:
+        stamp = {}
+    ok('L0.version-stamp', stamp.get('updateMechanism') == 'app-installer'
+       and bool(stamp.get('baseVersion')) and bool(stamp.get('commit'))
+       and set(str(stamp.get('commit'))) != {'0'},
+       f"base={stamp.get('baseVersion')} display={stamp.get('displayVersion')}")
     idx = next((t0 / 'src' / 'hermes_cli' / 'web_dist' / 'assets').glob('index-*.js'), None)
     body = idx.read_text(errors='ignore') if idx else ''
     ok('L0.preload-prefix-fix', body.count('modulepreload') > 0 and 'return`/`+' not in body,
