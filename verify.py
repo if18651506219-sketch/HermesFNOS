@@ -14,7 +14,7 @@
 import argparse, json, os, queue, re, shutil, socket, subprocess, sys, threading, time
 from pathlib import Path
 
-sys.path.insert(0, '/vol2/@apphome/hermes-agent/data/venv/lib/python3.11/site-packages')
+sys.path.insert(0, '/vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/wsvenv/lib/python3.11/site-packages')
 import websocket  # websocket-client
 
 HERE = Path(__file__).resolve().parent
@@ -176,6 +176,14 @@ def tier0():
        f'index={idx.name if idx else None}')
     syntax = [f.name for f in (SIM / 'cmd').iterdir() if sh(['bash', '-n', str(f)]).returncode]
     ok('L0.cmd-syntax', not syntax, str(syntax))
+    sp = (t0 / 'sock_proxy.py').read_text(errors='ignore')
+    ok('L0.sock-keepalive', '_set_keepalive' in sp and 'TCP_KEEPIDLE' in sp)
+    ra = (t0 / 'src' / 'gateway' / 'run_adapters.py').read_text(errors='ignore')
+    ok('L0.adapter-retry', 'retrying once in 3s' in ra)
+    fa = (t0 / 'src' / 'plugins' / 'platforms' / 'feishu' / 'adapter.py').read_text(errors='ignore')
+    ok('L0.feishu-shrink', '_shrink_media_for_feishu' in fa and '_FEISHU_FILE_UPLOAD_LIMIT' in fa)
+    main_cmd = (SIM / 'cmd' / 'main').read_text(errors='ignore')
+    ok('L0.watchdog-seed', 'loop_watchdog_max_strikes' in main_cmd)
 
 # ---------- L1 ----------
 def tier1():

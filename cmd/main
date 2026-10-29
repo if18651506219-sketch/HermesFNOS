@@ -123,6 +123,12 @@ start_process() {
     sleep 1
 
     mkdir -p "${HERMES_HOME_DIR}" "${APP_HOME}/logs" "$(dirname "${SOCK_PATH}")"
+
+    # fnOS-port: seed liveness-watchdog tolerance for busy NAS hosts (idempotent).
+    if [ -f "${HERMES_HOME_DIR}/config.yaml" ] && ! grep -q "loop_watchdog_max_strikes" "${HERMES_HOME_DIR}/config.yaml"; then
+        sed -i '/^gateway:$/a\  loop_watchdog_max_strikes: 8' "${HERMES_HOME_DIR}/config.yaml" 2>/dev/null || true
+        grep -q "loop_watchdog_max_strikes" "${HERMES_HOME_DIR}/config.yaml" || printf '\ngateway:\n  loop_watchdog_max_strikes: 8\n' >> "${HERMES_HOME_DIR}/config.yaml"
+    fi
     seed_config
     seed_persona
 

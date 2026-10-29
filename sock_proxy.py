@@ -191,11 +191,31 @@ def send_error(conn, code, text):
         pass
 
 
+def _set_keepalive(sock):
+    """Enable TCP keepalive so idle websockets/long polls don't get silently
+    dropped by the fnOS gateway chain (observed close code 1005)."""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        return
+    for opt, val in (
+        (getattr(socket, "TCP_KEEPIDLE", None), 30),
+        (getattr(socket, "TCP_KEEPINTVL", None), 15),
+        (getattr(socket, "TCP_KEEPCNT", None), 4),
+    ):
+        if opt is not None:
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, opt, val)
+            except OSError:
+                pass
+
+
 def handle(conn):
     try:
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except OSError:
         pass
+    _set_keepalive(conn)
     keep = True
     try:
         while keep:

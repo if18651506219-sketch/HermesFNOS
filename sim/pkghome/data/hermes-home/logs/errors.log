@@ -1,0 +1,2 @@
+2026-10-29 20:02:48,141 ERROR hermes_state: FATAL: state.db was replaced underneath the gateway; refusing further writes to this file. Divert transcripts to sessions/<id>.jsonl (and the gateway pending_messages spool) and restore or reopen after operator intervention.
+2026-10-29 20:02:52,777 WARNING hermes_cli.kanban_db: kanban DB /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-repo/sim/pkghome/data/hermes-home/kanban.db lost its schema after this process initialized it (deleted or replaced externally); re-initializing.

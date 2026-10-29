@@ -1,0 +1,7 @@
+2026-10-29 20:02:47,854 INFO hermes_cli.mem_trim: memory trim: reason=messaging gateway housekeeping malloc_trim=1 rss_kib=233760->220372 rss_anon_kib=206612->193224 threads=19 duration_ms=86.3
+2026-10-29 20:02:48,141 ERROR hermes_state: FATAL: state.db was replaced underneath the gateway; refusing further writes to this file. Divert transcripts to sessions/<id>.jsonl (and the gateway pending_messages spool) and restore or reopen after operator intervention.
+2026-10-29 20:02:52,777 WARNING hermes_cli.kanban_db: kanban DB /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-repo/sim/pkghome/data/hermes-home/kanban.db lost its schema after this process initialized it (deleted or replaced externally); re-initializing.
+2026-10-29 20:03:47,928 INFO hermes_cli.mem_trim: memory trim: reason=messaging gateway housekeeping malloc_trim=1 rss_kib=221372->220200 rss_anon_kib=194224->193052 threads=19 duration_ms=66.9
+2026-10-29 20:04:48,002 INFO hermes_cli.mem_trim: memory trim: reason=messaging gateway housekeeping malloc_trim=1 rss_kib=221228->220320 rss_anon_kib=194080->193172 threads=19 duration_ms=65.7
+2026-10-29 20:05:48,087 INFO hermes_cli.mem_trim: memory trim: reason=messaging gateway housekeeping malloc_trim=1 rss_kib=221184->220260 rss_anon_kib=194036->193112 threads=19 duration_ms=67.9
+2026-10-29 20:06:48,150 INFO hermes_cli.mem_trim: memory trim: reason=idle reaper periodic trim malloc_trim=1 rss_kib=221260->220260 rss_anon_kib=194112->193112 threads=19 duration_ms=67.8

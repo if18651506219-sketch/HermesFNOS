@@ -1,0 +1,18 @@
+--- /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/refpay/src/gateway/run_adapters.py	2026-10-24 03:14:02.000000000 +0800
++++ /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/stage/app/src/gateway/run_adapters.py	2026-10-29 19:59:25.536141413 +0800
+@@ -1917,6 +1917,15 @@
+             from gateway.platform_registry import platform_registry
+             if platform_registry.is_registered(platform.value):
+                 adapter = platform_registry.create_adapter(platform.value, config)
++                if adapter is None:
++                    # fnOS-port patch: transient failures during app install/upgrade windows
++                    # (deps not ready) previously killed the platform for the whole process
++                    # lifetime. Retry once after a short pause before giving up.
++                    logger.warning(
++                        "Platform '%s' adapter creation failed; retrying once in 3s", platform.value,
++                    )
++                    time.sleep(3.0)
++                    adapter = platform_registry.create_adapter(platform.value, config)
+                 if adapter is None:  # registered but failed — never fall through to built-ins
+                     logger.error(
+                         "Platform '%s' is registered but adapter creation failed "

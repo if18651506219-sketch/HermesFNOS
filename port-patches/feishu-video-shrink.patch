@@ -1,0 +1,96 @@
+--- /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/refpay/src/plugins/platforms/feishu/adapter.py	2026-10-24 03:14:02.000000000 +0800
++++ /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/stage/app/src/plugins/platforms/feishu/adapter.py	2026-10-29 19:59:25.540141436 +0800
+@@ -3652,6 +3652,61 @@
+         except Exception:
+             return 0
+ 
++    # fnOS-port patch: Feishu im/v1/files hard-limits uploads at 30MB; beyond that the edge
++    # returns a non-JSON body and the SDK dies with JSONDecodeError ("Expecting value").
++    _FEISHU_FILE_UPLOAD_LIMIT = 30 * 1024 * 1024
++    _FEISHU_SHRINK_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
++
++    async def _shrink_media_for_feishu(self, file_path: str) -> Optional[str]:
++        """Re-encode an oversized video to ~26MB via ffmpeg; return temp path or None."""
++        import shutil as _shutil
++        import subprocess
++        if Path(file_path).suffix.lower() not in self._FEISHU_SHRINK_VIDEO_EXTS:
++            return None
++        if not (_shutil.which("ffmpeg") and _shutil.which("ffprobe")):
++            return None
++        out_dir = get_hermes_home() / "cache"
++        out_dir.mkdir(parents=True, exist_ok=True)
++        out_path = str(out_dir / f"feishu_shrunk_{os.getpid()}_{os.path.basename(file_path)}")
++
++        def _encode() -> Optional[str]:
++            probe = subprocess.run(
++                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file_path],
++                capture_output=True, text=True, timeout=60)
++            try:
++                duration = float(probe.stdout.strip())
++            except ValueError:
++                return None
++            if duration <= 0:
++                return None
++            audio_kbps = 96
++            v_kbps = max(350, int((26 * 1024 * 1024 * 8) / (1024 * duration)) - audio_kbps - 40)
++            cmd = [
++                "ffmpeg", "-y", "-v", "error", "-i", file_path,
++                "-c:v", "libx264", "-preset", "veryfast",
++                "-b:v", f"{v_kbps}k", "-maxrate", f"{v_kbps * 2}k", "-bufsize", f"{v_kbps * 2}k",
++                "-vf", "scale='min(1280,iw)':-2",
++                "-c:a", "aac", "-b:a", f"{audio_kbps}k",
++                "-movflags", "+faststart", out_path,
++            ]
++            try:
++                subprocess.run(cmd, capture_output=True, timeout=900, check=True)
++            except (subprocess.SubprocessError, OSError):
++                try:
++                    os.unlink(out_path)
++                except OSError:
++                    pass
++                return None
++            try:
++                if os.path.getsize(out_path) > 29 * 1024 * 1024:
++                    os.unlink(out_path)
++                    return None
++            except OSError:
++                return None
++            return out_path
++
++        return await asyncio.to_thread(_encode)
++
+     async def _send_uploaded_file_message(
+         self, *, chat_id: str, file_path: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
+         caption: Optional[str] = None, file_name: Optional[str] = None, outbound_message_type: str = "file",
+@@ -3662,6 +3717,18 @@
+             return SendResult(success=False, error=f"File not found: {file_path}")
+ 
+         display_name = file_name or os.path.basename(file_path)
++        shrunk_path: Optional[str] = None
++        try:
++            _orig_size = os.path.getsize(file_path)
++        except OSError:
++            _orig_size = 0
++        if _orig_size > self._FEISHU_FILE_UPLOAD_LIMIT:
++            shrunk_path = await self._shrink_media_for_feishu(file_path)
++            if not shrunk_path:
++                return SendResult(success=False, error=(
++                    f"{display_name} is {_orig_size // (1024 * 1024)}MB — over Feishu's 30MB upload limit; "
++                    "send a file path or download link instead"))
++            file_path = shrunk_path
+         upload_file_type, resolved_message_type = self._resolve_outbound_file_routing(
+             file_path=display_name, requested_message_type=outbound_message_type,
+         )
+@@ -3711,6 +3778,12 @@
+         except Exception as exc:
+             logger.error("[Feishu] Failed to send file %s: %s", file_path, exc, exc_info=True)
+             return SendResult(success=False, error=str(exc))
++        finally:
++            if shrunk_path:
++                try:
++                    os.unlink(shrunk_path)
++                except OSError:
++                    pass
+ 
+     async def _send_uploaded_key(
+         self, *, chat_id: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]], caption: Optional[str],
