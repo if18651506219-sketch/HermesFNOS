@@ -1,1 +1,5 @@
 pkg/*.fpk
+
+sim/
+
+__pycache__/

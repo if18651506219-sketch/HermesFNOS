@@ -1,0 +1,16 @@
+a/src/hermes_cli/web_server.py /tmp/refbase/src/hermes_cli/web_server.py	2026-11-01 08:49:26.586309353 +0800
+b/src/hermes_cli/web_server.py /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/stage/app/src/hermes_cli/web_server.py	2026-10-31 07:34:27.051718425 +0800
+@@ -701,7 +701,12 @@
+     if recent is not None:
+         spawned_at, recent_proc, recent_command = recent
+         age = time.monotonic() - spawned_at if recent_command == tuple(subcommand) else None
+-        if age is not None and age < GATEWAY_RESTART_COOLDOWN_SECONDS:
++        # fnOS-port 0.22.5.6 P0-10: coalesce only while the tracked restart child
++        # is still alive. A dead child means the previous restart attempt already
++        # failed (refused start, stale lock) — coalescing onto it left the
++        # gateway permanently down with no error surfaced to the user.
++        child_alive = recent_proc is not None and getattr(recent_proc, "poll", None) is not None and recent_proc.poll() is None
++        if age is not None and age < GATEWAY_RESTART_COOLDOWN_SECONDS and child_alive:
+             _log.info(
+                 "Coalescing gateway restart: one was started %.1fs ago "
+                 "(pid %s) and the gateway may still be coming back; not "

@@ -28,6 +28,30 @@ if [ -s "$TMPKEY" ] && grep -q . "$TMPKEY"; then
     chown "${APPNAME}:${APPNAME}" "$KEYFILE" 2>/dev/null
 else
     rm -f "$TMPKEY"
+    # P1-2: if a Strata engine is installed but its key could not be read,
+    # say so loudly instead of silently 401-ing every model call later.
+    if [ -d /vol2/@appdata/trim.hermes ] || [ -d /vol2/@appcenter/strata-app ]; then
+        echo "hermes-si: WARNING strata engine detected but api key extraction failed; model calls may return 401 until a key is registered in Hermes Settings -> Providers." >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+    fi
+fi
+
+# Ensure a systemd user manager exists for the app user: without lingering
+# there is no user bus, systemctl --user fails "No medium found", the gateway
+# cannot be installed as a managed unit and stays a SIGHUP-vulnerable child.
+APP_UID_USER=$(stat -c '%U' "${TRIM_PKGHOME:-/var/apps/hermes-si/data}" 2>/dev/null || echo "")
+# 0.22.5.3 P0-5 (revised): do NOT enable linger. Linger exposes a systemd user
+# bus, upstream then installs hermes-gateway-<hash>.service while the dashboard
+# also auto-spawns its own gateway: two owners fight over gateway.lock and the
+# unit's Restart loop storms. fnOS keeps the dashboard as the single supervisor.
+if [ -n "$APP_UID_USER" ] && command -v loginctl >/dev/null 2>&1; then
+    loginctl disable-linger "$APP_UID_USER" >/dev/null 2>&1 || true
+fi
+# 0.22.5.3 P0-8: fnOS app users have no /home entry; upstream `hermes gateway install`
+# and unit writes hit PermissionError '/home/<user>'. Create it idempotently.
+if [ -n "$APP_UID_USER" ] && [ "$APP_UID_USER" != "root" ]; then
+    mkdir -p "/home/${APP_UID_USER}" 2>/dev/null || true
+    chown "${APP_UID_USER}:${APP_UID_USER}" "/home/${APP_UID_USER}" 2>/dev/null || true
+    chmod 755 "/home/${APP_UID_USER}" 2>/dev/null || true
 fi
 
 exit 0

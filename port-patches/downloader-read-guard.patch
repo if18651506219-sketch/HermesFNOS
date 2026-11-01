@@ -1,0 +1,64 @@
+a/src/pm/downloader.py /tmp/refbase/src/pm/downloader.py	2026-11-01 08:49:26.658241940 +0800
+b/src/pm/downloader.py /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/stage/app/src/pm/downloader.py	2026-10-30 12:14:17.399093122 +0800
+@@ -49,6 +49,34 @@
+ _LOOPBACK = ("http://127.0.0.1:", "http://localhost:", "http://[::1]:")
+ _CHUNK = 1 << 20  # read/write block, also the minimum range size
+ 
++_READ_STALL_SECONDS = 90.0
++
++
++def _read_guarded(response, n: int) -> bytes:
++    """``response.read1`` with an explicit socket-stall guard.
++
++    urlopen's timeout only bounds the connect/header phase, so a server that
++    dribbles bytes — or a half-closed TLS socket — can park a downloader
++    thread inside ``ssl`` read indefinitely; field reports showed the gateway
++    liveness watchdog firing while pm fetch threads sat exactly there.
++    ``read1`` returns whatever the buffer already holds and the socket
++    timeout bounds every wait, turning a silent wedge into a normal
++    incomplete-read retry.
++    """
++    try:
++        sock = response.fp.raw._sock  # type: ignore[attr-defined]
++    except AttributeError:
++        sock = None
++    if sock is not None:
++        with suppress(Exception):
++            sock.settimeout(_READ_STALL_SECONDS)
++    try:
++        return response.read1(n)
++    except (socket.timeout, TimeoutError) as exc:
++        raise http.client.IncompleteRead(b"", n) from exc
++
++
++
+ 
+ class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
+     """The https-only gate must hold across redirects, not just the first
+@@ -544,7 +572,7 @@
+                     while position < end:
+                         if self._paused.is_set() or stop.is_set():
+                             return
+-                        chunk = response.read(min(_CHUNK, end - position))
++                        chunk = _read_guarded(response, min(_CHUNK, end - position))
+                         if not chunk:
+                             raise http.client.IncompleteRead(b"", end - position)
+                         stream.write(chunk)
+@@ -552,7 +580,7 @@
+                         with lock:
+                             covered[:] = _coalesce(covered + [(start, position)])
+                             updated.set()
+-                    if response.read(1):
++                    if _read_guarded(response, 1):
+                         raise _RangeError("range body exceeds its declared bounds")
+             except Exception as exc:
+                 if isinstance(exc, urllib.error.HTTPError):
+@@ -614,7 +642,7 @@
+                 while True:
+                     if self._paused.is_set():
+                         raise DownloadPaused(source.url)
+-                    chunk = response.read(_CHUNK)
++                    chunk = _read_guarded(response, _CHUNK)
+                     if not chunk:
+                         break
+                     stream.write(chunk)

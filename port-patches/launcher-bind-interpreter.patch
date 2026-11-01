@@ -1,0 +1,18 @@
+--- a/src/hermes_cli/_launchers.py
++++ b/src/hermes_cli/_launchers.py
+@@ -46,7 +46,14 @@
+     No selected generation or ambient PYTHONPATH is captured in the command.
+     """
+     root = Path(repo_root).resolve()
+-    python = python or resolve_store_python(root) or Path(sys.executable)
++    # fnOS-port 0.22.5.7 P0-12 launcher-bind-interpreter: the fpk bundles a uv
++    # "store" python under hermes-home/tools that PM never commits, so every
++    # dashboard action child (gateway restart/stop/start) picked it up here and
++    # died in _require_own_dependencies: "no dependency environment is committed
++    # for this install" (gateway-restart.log, every click since 10-30). The
++    # dashboard's own bundled python314 (+.pth->venv) boots fine under -I, so
++    # bind action children to it instead of the uncommitted store python.
++    python = python or Path(sys.executable)
+     entry = f"exec({_inline_string_literal(code)})" if code is not None else (
+         f"runpy.run_module({_inline_string_literal(module)}, run_name='__main__', alter_sys=True)")
+     # A literal home is pinned up front; the default one needs ``hermes_constants`` from the

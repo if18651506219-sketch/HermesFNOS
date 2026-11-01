@@ -26,7 +26,7 @@ KEY_NAME = 'CUSTOM_UMV4M5OPLH7KI_API_KEY'
 ENGINE = 'http://127.0.0.1:8080/v1'
 MODEL = 'qwen3.8-flash-next-iq3_s'
 PROD_PORT = '9119'  # 遗留：hermes-si fpk 生产实例端口（此 NAS 未装 hermes-si 时不存在）
-PROD_PORTS_LIVE = ('9219', '19119')  # 实机在跑的生产 dashboard（自身 + trim.hermes），断言不许被 harness 波及
+PROD_PORTS_LIVE = ('9119', '19119')  # 实机在跑的生产 dashboard（hermes-si 实测 9119 + trim.hermes 19119），断言不许被 harness 波及
 FAILS = []
 
 def ok(tag, cond, detail=''):
@@ -184,6 +184,49 @@ def tier0():
     ok('L0.feishu-shrink', '_shrink_media_for_feishu' in fa and '_FEISHU_FILE_UPLOAD_LIMIT' in fa)
     main_cmd = (SIM / 'cmd' / 'main').read_text(errors='ignore')
     ok('L0.watchdog-seed', 'loop_watchdog_max_strikes' in main_cmd)
+    ok('L0.idle-seed', 'unmanaged_idle_exit_seconds' in main_cmd)
+    ok('L0.gw-reap', 'reap_gateway' in main_cmd and 'systemctl --user' in main_cmd)
+    uc = (SIM / 'cmd' / 'uninstall_callback').read_text(errors='ignore')
+    ok('L0.unit-cleanup', 'hermes-gateway-' in uc)
+    ic = (SIM / 'cmd' / 'install_callback').read_text(errors='ignore')
+    ok('L0.key-extract-warning', 'WARNING strata engine detected' in ic)
+    ok('L0.no-reap-guard', 'HERMES_NO_REAP' in main_cmd)
+    ok('L0.single-supervisor', 'P0-5' in main_cmd and 'systemctl_user disable' in main_cmd
+       and 'default.target.wants/' in main_cmd)
+    ok('L0.no-linger', 'disable-linger' in ic and 'enable-linger "$APP_UID_USER" >/dev/null' not in ic)
+    ok('L0.home-dir', 'mkdir -p "/home/${APP_UID_USER}"' in ic)
+    dl = (t0 / 'src' / 'pm' / 'downloader.py').read_text(errors='ignore')
+    ok('L0.downloader-read-guard', '_read_guarded' in dl and 'read1' in dl)
+    su = (t0 / 'src' / 'tools' / 'skill_usage.py').read_text(errors='ignore')
+    ok('L0.skill-lock-selfheal', 'PermissionError' in su and 'chmod' in su)
+    ok('L0.group-policy-seed', 'FEISHU_GROUP_POLICY=open' in main_cmd)
+    ok('L0.lock-takeover', 'taking over gateway.lock' in main_cmd and '"hermes_home"' in main_cmd)
+    ok('L0.host-record-cleanup', 'gateway-locks/' in main_cmd)
+    ws = (t0 / 'src' / 'hermes_cli' / 'web_server.py').read_text(errors='ignore')
+    ok('L0.restart-coalesce-alive', 'child_alive' in ws and 'P0-10' in ws)
+    la = (t0 / 'src' / 'hermes_cli' / '_launchers.py').read_text(errors='ignore')
+    ok('L0.launcher-bind-interpreter',
+       'P0-12' in la and 'python = python or Path(sys.executable)' in la
+       and 'resolve_store_python(root) or Path(sys.executable)' not in la)
+    rb = (t0 / 'src' / 'gateway' / 'run_bootstrap.py').read_text(errors='ignore')
+    ok('L0.stale-lock-selfheal',
+       '_hermes_fnos_clear_stale_lock' in rb and 'gateway.lock' in rb)
+    spdir = t0 / 'venv' / 'lib' / 'python3.14' / 'site-packages'
+    ok('L0.feishu-sdk-bundled',
+       (spdir / 'lark_oapi').is_dir() and (spdir / 'Crypto').is_dir()
+       and (spdir / 'requests_toolbelt').is_dir())
+    hb = open(t0 / 'venv' / 'bin' / 'hermes', 'rb').read(80)
+    ok('L0.venv-shebang', hb.startswith(b'#!/var/apps/hermes-si/target/python314/bin/python3.14'))
+    n_foreign = 0
+    for dp, _dn, fn in os.walk(t0 / 'venv'):
+        for f in fn:
+            pth = os.path.join(dp, f)
+            try:
+                if b'@apphome/hermes-agent' in open(pth, 'rb').read(300000):
+                    n_foreign += 1
+            except Exception:
+                pass
+    ok('L0.venv-no-build-paths', n_foreign == 0, f'foreign-path files={n_foreign}')
 
 # ---------- L1 ----------
 def tier1():

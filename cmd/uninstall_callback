@@ -2,6 +2,25 @@
 
 ### This script is called after the user uninstalls the application.
 ### User data (${TRIM_PKGHOME}/data: hermes-home sessions/config) is kept
-### by fnOS data retention; nothing extra to clean here.
+### by fnOS data retention. But the systemd-user gateway unit must go: a
+### leftover unit auto-starts on the next boot with an ExecStart path the
+### uninstall removed -> 203/EXEC respawn storm (P0-2 distribution fix).
+
+APPNAME="hermes-si"
+HERMES_HOME_DIR="${TRIM_PKGHOME}/data/hermes-home"
+U=$(id -u "${APPNAME}" 2>/dev/null)
+if [ -n "${U}" ] && [ -S "/run/user/${U}/bus" ]; then
+    XDG_RUNTIME_DIR="/run/user/${U}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${U}/bus" \
+        systemctl --user list-unit-files --no-legend 'hermes-gateway-*' 2>/dev/null | awk '{print $1}' |
+    while read -r un; do
+        XDG_RUNTIME_DIR="/run/user/${U}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${U}/bus" \
+            systemctl --user disable --now "${un}" >/dev/null 2>&1 || true
+    done
+    XDG_RUNTIME_DIR="/run/user/${U}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${U}/bus" \
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+fi
+rm -rf "${HERMES_HOME_DIR}/.config/systemd/user/"hermes-gateway-*.service \
+       "${HERMES_HOME_DIR}/.config/systemd/user/"hermes-gateway-*.service.d \
+       "${HERMES_HOME_DIR}/.config/systemd/user/default.target.wants/"hermes-gateway-* 2>/dev/null
 
 exit 0

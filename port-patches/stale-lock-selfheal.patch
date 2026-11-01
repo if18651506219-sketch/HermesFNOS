@@ -1,0 +1,102 @@
+a/src/gateway/run_bootstrap.py /tmp/refbase/src/gateway/run_bootstrap.py	2026-11-01 08:49:26.519110841 +0800
+b/src/gateway/run_bootstrap.py /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/stage/app/src/gateway/run_bootstrap.py	2026-10-30 20:15:03.612403425 +0800
+@@ -725,12 +725,99 @@
+         logger.debug("early environment probe did not start", exc_info=True)
+ 
+ 
++def _hermes_fnos_clear_stale_lock() -> None:
++    """Clear a gateway.lock whose recorded PID is no longer a live gateway.
++
++    fnOS packaging fix (2026-10-30): a SIGKILLed gateway leaves gateway.lock behind;
++    every later start then refuses with "Another gateway instance is already running"
++    and systemd retries forever (measured: 1267 restarts/day). Validate the recorded
++    PID against the live process — and against PID reuse via start_time — and unlink
++    the stale records before any other lock logic runs.
++    """
++    import json as _json
++    import os as _os
++    from pathlib import Path as _Path
++
++    def _home() -> _Path:
++        return _Path(_os.environ.get("HERMES_HOME") or (_Path.home() / ".hermes"))
++
++    lock = _home() / "gateway.lock"
++    if not lock.exists():
++        return
++    try:
++        rec = _json.loads(lock.read_text(encoding="utf-8"))
++    except Exception:
++        # Unreadable/corrupt lock is not authority to keep refusing: drop it.
++        for p in (lock, _home() / "gateway_state.json"):
++            try:
++                p.unlink(missing_ok=True)
++            except OSError:
++                pass
++        return
++
++    pid = rec.get("pid")
++    if not isinstance(pid, int) or pid <= 0:
++        try:
++            lock.unlink(missing_ok=True)
++        except OSError:
++            pass
++        return
++    if pid == _os.getpid():
++        return
++
++    alive = True
++    try:
++        _os.kill(pid, 0)
++    except OSError:
++        alive = False
++
++    if alive:
++        # PID reuse guard: compare the recorded start_time when we can read it.
++        recorded = rec.get("start_time")
++        actual = None
++        try:
++            with open(f"/proc/{pid}/stat", "rb") as fh:
++                fields = fh.read().split(b") ", 1)[1].split()
++            actual = int(fields[19])
++        except Exception:
++            actual = None
++        if recorded is not None and actual is not None and recorded != actual:
++            alive = False
++        else:
++            # Confirm it is actually a gateway, not an unrelated process reusing the PID.
++            try:
++                cmdline = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\x00", b" ")
++                if b"gateway" not in cmdline:
++                    alive = False
++            except OSError:
++                pass
++
++    if alive:
++        return
++
++    import logging as _logging
++    removed = []
++    for p in (lock, _home() / "gateway_state.json", _home() / "gateway.pid"):
++        try:
++            if p.exists():
++                p.unlink()
++                removed.append(p.name)
++        except OSError:
++            pass
++    _logging.getLogger("gateway.run").warning(
++        "Cleared stale gateway lock (recorded pid %s was not a live gateway); removed: %s",
++        pid, ", ".join(removed) or "nothing",
++    )
++
++
+ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False,
+                         verbosity: Optional[int] = 0, force: bool = False, idle_exit: bool = False) -> bool:
+     """Start the gateway and run until interrupted; False if it failed to start (non-zero exit so
+     systemd can auto-restart). ``replace`` kills any existing instance first (avoids restart-loop
+     deadlocks); ``force`` starts without consulting the host owner at all; ``idle_exit`` arms the
+     unmanaged idle exit (``gateway.run_idle_exit``) for a client-started daemon."""
++    _hermes_fnos_clear_stale_lock()
++
+     from gateway.run import (
+         GatewayRunner,
+         _best_effort,

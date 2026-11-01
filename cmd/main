@@ -110,6 +110,63 @@ seed_persona() {
     fi
 }
 
+systemctl_user() {
+    # fnOS-port P0-1/P0-2: drive the upstream systemd-user gateway unit
+    # (hermes-gateway-<hash>.service). The dashboard installs it as a user
+    # service; our pidfiles do not cover it, so stop/start must manage it or
+    # an orphaned "gateway run" keeps holding gateway_state.json (stale fatal
+    # in the UI after an app-center restart).
+    local u
+    u=$(id -u)
+    [ -S "/run/user/${u}/bus" ] || return 0
+    XDG_RUNTIME_DIR="/run/user/${u}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${u}/bus" \
+        systemctl --user "$@" >/dev/null 2>&1 || true
+}
+
+reap_gateway() {
+    [ "${HERMES_NO_REAP:-0}" = "1" ] && return 0
+    # fnOS-port 0.22.5.3 P0-5: single-supervisor. The dashboard auto-spawns and
+    # respawns its gateway (unmanaged); if a systemd-user unit coexists, both
+    # owners fight over gateway.lock and Restart=always storms (~every 26s the
+    # losing attempt exits non-zero, breaking chat connections). Uninstall it.
+    for un in $(systemctl_user list-units --all --no-legend 'hermes-gateway-*' | awk '{print $1}'); do
+        systemctl_user stop "$un"
+        systemctl_user disable "$un"
+    done
+    rm -rf "${HERMES_HOME_DIR}/.config/systemd/user/"hermes-gateway-*.service \
+           "${HERMES_HOME_DIR}/.config/systemd/user/"hermes-gateway-*.service.d \
+           "${HERMES_HOME_DIR}/.config/systemd/user/default.target.wants/"hermes-gateway-*.service 2>/dev/null
+    systemctl_user daemon-reload
+    pkill -TERM -f "hermes-si.*gateway run" 2>/dev/null || true
+    pkill -TERM -f "hermes-si.*hermes_cli.main gateway" 2>/dev/null || true
+    # PPID=1 orphans (crashed dashboard parent) wedge gateway_state.json.
+    for p in $(ps -eo pid,ppid,args 2>/dev/null | awk '$2==1 && /hermes-si.*(gateway run|hermes_cli.main gateway)/ {print $1}'); do
+        kill -TERM "$p" 2>/dev/null || true
+    done
+    # fnOS-port 0.22.5.4 P0-9: lock-holder takeover. A live gateway from an
+    # external session (debug agent, manual run) can hold gateway.lock with
+    # PPID pointing at another app; our respawn would defer to it forever.
+    # The lock record carries hermes_home: if it names THIS app's home, the
+    # holder belongs to us — terminate it and clear the records.
+    LOCKF="${HERMES_HOME_DIR}/gateway.lock"
+    if [ -f "$LOCKF" ]; then
+        holder=$(sed -n 's/.*"pid": \([0-9]*\).*/\1/p' "$LOCKF" 2>/dev/null)
+        hhome=$(sed -n 's/.*"hermes_home": "\([^"]*\)".*/\1/p' "$LOCKF" 2>/dev/null)
+        if [ -n "$holder" ] && [ "$hhome" = "${HERMES_HOME_DIR}" ] && kill -0 "$holder" 2>/dev/null; then
+            log_msg "reap: taking over gateway.lock held by pid $holder"
+            kill -TERM "$holder" 2>/dev/null || true
+            sleep 3
+            kill -KILL "$holder" 2>/dev/null || true
+        fi
+        rm -f "$LOCKF" "${HERMES_HOME_DIR}/gateway_state.json" "${HERMES_HOME_DIR}/gateway.pid" 2>/dev/null
+        # Root-owned host rendezvous records left by manual `gateway run` under
+        # sudo make every app gateway start spam "owned by uid 0" warnings.
+        # The parent dirs belong to the app user, so unlink works regardless
+        # of file ownership; safe because we just terminated the holder.
+        rm -f "${HERMES_HOME_DIR}/.local/state/hermes/gateway-locks/"*.json 2>/dev/null
+    fi
+}
+
 start_process() {
     if running; then
         return 0
@@ -120,14 +177,47 @@ start_process() {
     # socket/port but absent from our pidfiles would hang the gateway.
     pkill -TERM -f "sock_proxy.py ${SOCK_PATH}" 2>/dev/null || true
     pkill -TERM -f "${TRIM_APPDEST}/venv/bin/python3.14 -m hermes_cli.main dashboard" 2>/dev/null || true
+    reap_gateway
+    # fnOS-port P0-2: a unit left over from a previous install can point ExecStart
+    # at a launcher that reinstall deleted; systemd then 203/EXEC auto-restart
+    # storms until the dashboard regenerates it. Drop broken units up front.
+    for uf in "${HERMES_HOME_DIR}/.config/systemd/user/"hermes-gateway-*.service; do
+        [ -f "$uf" ] || continue
+        un=$(basename "$uf")
+        ex=$(systemctl_user show "$un" -p ExecStart | tr ';' '\n' | grep -m1 -oE 'path=[^ ]+' | cut -d= -f2)
+        if [ -z "$ex" ]; then
+            ex=$(grep -m1 '^ExecStart=' "$uf" | awk '{print $2}' | tr -d '"')
+        fi
+        if [ -n "$ex" ] && [ ! -x "$ex" ]; then
+            log_msg "stale gateway unit $un (ExecStart missing: $ex) -> removing"
+            systemctl_user stop "$un"
+            systemctl_user disable "$un"
+            rm -rf "${uf}.d" "$uf" "${HERMES_HOME_DIR}/.config/systemd/user/default.target.wants/${un}"
+            systemctl_user daemon-reload
+        fi
+    done
     sleep 1
 
     mkdir -p "${HERMES_HOME_DIR}" "${APP_HOME}/logs" "$(dirname "${SOCK_PATH}")"
 
-    # fnOS-port: seed liveness-watchdog tolerance for busy NAS hosts (idempotent).
-    if [ -f "${HERMES_HOME_DIR}/config.yaml" ] && ! grep -q "loop_watchdog_max_strikes" "${HERMES_HOME_DIR}/config.yaml"; then
-        sed -i '/^gateway:$/a\  loop_watchdog_max_strikes: 8' "${HERMES_HOME_DIR}/config.yaml" 2>/dev/null || true
-        grep -q "loop_watchdog_max_strikes" "${HERMES_HOME_DIR}/config.yaml" || printf '\ngateway:\n  loop_watchdog_max_strikes: 8\n' >> "${HERMES_HOME_DIR}/config.yaml"
+    # fnOS-port 0.22.5.3 P0-6: upstream Feishu group policy defaults to
+    # 'allowlist' with an empty FEISHU_ALLOWED_USERS, so a bot added to any
+    # group silently ignores every member (drops logged only at DEBUG after
+    # the first). Seed an explicit default once the app has Feishu credentials
+    # configured; users can still override by editing .env themselves.
+    if [ -f "${HERMES_HOME_DIR}/.env" ] && grep -q '^FEISHU_APP_ID=' "${HERMES_HOME_DIR}/.env" \
+       && ! grep -q '^FEISHU_GROUP_POLICY=' "${HERMES_HOME_DIR}/.env"; then
+        printf 'FEISHU_GROUP_POLICY=open\n' >> "${HERMES_HOME_DIR}/.env"
+    fi
+
+    # fnOS-port: seed NAS-resident gateway defaults (idempotent): watchdog
+    # tolerance for busy NAS hosts + P2 unmanaged_idle_exit_seconds=0 (the
+    # desktop default reaps an unmanaged gateway after 600s idle, wrong on NAS).
+    if [ -f "${HERMES_HOME_DIR}/config.yaml" ]; then
+        grep -q "^gateway:" "${HERMES_HOME_DIR}/config.yaml" || printf '\ngateway:\n' >> "${HERMES_HOME_DIR}/config.yaml"
+        for kv in "loop_watchdog_max_strikes: 8" "unmanaged_idle_exit_seconds: 0"; do
+            grep -q "${kv%%:*}" "${HERMES_HOME_DIR}/config.yaml" || sed -i "/^gateway:$/a\  ${kv}" "${HERMES_HOME_DIR}/config.yaml" 2>/dev/null
+        done
     fi
     seed_config
     seed_persona
@@ -200,6 +290,10 @@ stop_process() {
     # TUI chat tab spawns node children under the dashboard; sweep by our paths
     pkill -TERM -f "${TRIM_APPDEST}/src" 2>/dev/null
     pkill -TERM -f "hermes-si.sock" 2>/dev/null
+    # fnOS-port P0-1: also stop the systemd-user gateway unit and any surviving
+    # gateway process, otherwise an orphan holds gateway_state.json and the UI
+    # shows a permanently fatal/stale gateway after restart.
+    reap_gateway
     rm -f "${SOCK_PATH}" "${PID_FILE}"
     return 0
 }
