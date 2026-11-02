@@ -1,6 +1,6 @@
-a/src/hermes_cli/web_server.py /tmp/refbase/src/hermes_cli/web_server.py	2026-11-01 08:49:26.586309353 +0800
-b/src/hermes_cli/web_server.py /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/stage/app/src/hermes_cli/web_server.py	2026-10-31 07:34:27.051718425 +0800
-@@ -701,7 +701,12 @@
+--- a/src/hermes_cli/web_server.py
++++ b/src/hermes_cli/web_server.py
+@@ -712,7 +712,12 @@
      if recent is not None:
          spawned_at, recent_proc, recent_command = recent
          age = time.monotonic() - spawned_at if recent_command == tuple(subcommand) else None

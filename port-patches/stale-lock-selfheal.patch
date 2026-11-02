@@ -1,6 +1,6 @@
-a/src/gateway/run_bootstrap.py /tmp/refbase/src/gateway/run_bootstrap.py	2026-11-01 08:49:26.519110841 +0800
-b/src/gateway/run_bootstrap.py /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/stage/app/src/gateway/run_bootstrap.py	2026-10-30 20:15:03.612403425 +0800
-@@ -725,12 +725,99 @@
+--- a/src/gateway/run_bootstrap.py
++++ b/src/gateway/run_bootstrap.py
+@@ -696,12 +696,99 @@
          logger.debug("early environment probe did not start", exc_info=True)
  
  

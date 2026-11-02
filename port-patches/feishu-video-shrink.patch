@@ -1,6 +1,6 @@
---- /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/refpay/src/plugins/platforms/feishu/adapter.py	2026-10-24 03:14:02.000000000 +0800
-+++ /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/stage/app/src/plugins/platforms/feishu/adapter.py	2026-10-29 19:59:25.540141436 +0800
-@@ -3652,6 +3652,61 @@
+--- a/src/plugins/platforms/feishu/adapter.py
++++ b/src/plugins/platforms/feishu/adapter.py
+@@ -3685,6 +3685,61 @@
          except Exception:
              return 0
  
@@ -62,7 +62,7 @@
      async def _send_uploaded_file_message(
          self, *, chat_id: str, file_path: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
          caption: Optional[str] = None, file_name: Optional[str] = None, outbound_message_type: str = "file",
-@@ -3662,6 +3717,18 @@
+@@ -3695,6 +3750,18 @@
              return SendResult(success=False, error=f"File not found: {file_path}")
  
          display_name = file_name or os.path.basename(file_path)
@@ -81,7 +81,7 @@
          upload_file_type, resolved_message_type = self._resolve_outbound_file_routing(
              file_path=display_name, requested_message_type=outbound_message_type,
          )
-@@ -3711,6 +3778,12 @@
+@@ -3744,6 +3811,12 @@
          except Exception as exc:
              logger.error("[Feishu] Failed to send file %s: %s", file_path, exc, exc_info=True)
              return SendResult(success=False, error=str(exc))

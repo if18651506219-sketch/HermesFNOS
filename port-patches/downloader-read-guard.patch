@@ -1,9 +1,10 @@
-a/src/pm/downloader.py /tmp/refbase/src/pm/downloader.py	2026-11-01 08:49:26.658241940 +0800
-b/src/pm/downloader.py /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/stage/app/src/pm/downloader.py	2026-10-30 12:14:17.399093122 +0800
-@@ -49,6 +49,34 @@
+--- a/src/pm/downloader.py
++++ b/src/pm/downloader.py
+@@ -48,6 +48,33 @@
+ _UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) hermes-pm/1.0", "Accept-Encoding": "identity"}
  _LOOPBACK = ("http://127.0.0.1:", "http://localhost:", "http://[::1]:")
  _CHUNK = 1 << 20  # read/write block, also the minimum range size
- 
++
 +_READ_STALL_SECONDS = 90.0
 +
 +
@@ -30,30 +31,28 @@ b/src/pm/downloader.py /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-wor
 +    except (socket.timeout, TimeoutError) as exc:
 +        raise http.client.IncompleteRead(b"", n) from exc
 +
-+
-+
+ _CHECKPOINT_SECONDS = 5.0
  
- class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
-     """The https-only gate must hold across redirects, not just the first
-@@ -544,7 +572,7 @@
-                     while position < end:
-                         if self._paused.is_set() or stop.is_set():
-                             return
--                        chunk = response.read(min(_CHUNK, end - position))
-+                        chunk = _read_guarded(response, min(_CHUNK, end - position))
-                         if not chunk:
-                             raise http.client.IncompleteRead(b"", end - position)
-                         stream.write(chunk)
-@@ -552,7 +580,7 @@
-                         with lock:
-                             covered[:] = _coalesce(covered + [(start, position)])
-                             updated.set()
--                    if response.read(1):
-+                    if _read_guarded(response, 1):
-                         raise _RangeError("range body exceeds its declared bounds")
-             except Exception as exc:
-                 if isinstance(exc, urllib.error.HTTPError):
-@@ -614,7 +642,7 @@
+ 
+@@ -534,7 +561,7 @@
+             while position < end:
+                 if self._paused.is_set() or stop.is_set():
+                     return
+-                chunk = response.read(min(_CHUNK, end - position))
++                chunk = _read_guarded(response, min(_CHUNK, end - position))
+                 if not chunk:
+                     raise http.client.IncompleteRead(b"", end - position)
+                 stream.write(chunk)
+@@ -542,7 +569,7 @@
+                 position += len(chunk)
+                 # A complete checkpoint must not bypass the body-bounds check
+                 # if the process dies between the last write and EOF validation.
+-                if position == end and response.read(1):
++                if position == end and _read_guarded(response, 1):
+                     raise _RangeError("range body exceeds its declared bounds")
+                 record(start, position)
+ 
+@@ -650,7 +677,7 @@
                  while True:
                      if self._paused.is_set():
                          raise DownloadPaused(source.url)

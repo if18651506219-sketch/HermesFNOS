@@ -1,6 +1,6 @@
---- /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/refpay/src/gateway/run_adapters.py	2026-10-24 03:14:02.000000000 +0800
-+++ /vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/stage/app/src/gateway/run_adapters.py	2026-10-29 19:59:25.536141413 +0800
-@@ -1917,6 +1917,15 @@
+--- a/src/gateway/run_adapters.py
++++ b/src/gateway/run_adapters.py
+@@ -1936,6 +1936,15 @@
              from gateway.platform_registry import platform_registry
              if platform_registry.is_registered(platform.value):
                  adapter = platform_registry.create_adapter(platform.value, config)

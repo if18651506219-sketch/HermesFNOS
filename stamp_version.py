@@ -11,8 +11,8 @@ import json
 import sys
 from datetime import datetime, timezone
 
-COMMIT = "bf0203a794a07aac3ff764972ab9087baa4e4f4e"  # upstream v0.22.5 tag
-COMMIT_DATE = 1792693467
+COMMIT = "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab"  # upstream v0.22.6 tag
+COMMIT_DATE = 1793635052
 
 def main():
     pkg = sys.argv[1]

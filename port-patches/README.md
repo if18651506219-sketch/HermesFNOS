@@ -77,3 +77,10 @@ verify.py L0 asserts all four fingerprints.
 - stale-lock-selfheal.patch: 0.22.5.4+ P0-7 载荷层死锁自愈（run_bootstrap）
 - restart-coalesce-alive.patch: 0.22.5.6 P0-10 重启合并判活（web_server）
 - downloader-read-guard.patch: pm/downloader 读超时保护（read1+settimeout）
+
+## 2026-11-03 kernel 0.22.6 → fnos 0.22.6.1（本地 ALL-PASS，VM 回归待用户重启）
+- port-patches 全部 7 个补丁已按 0.22.6 内核重生成（per-file 统一 diff，src/ 前缀，patch -p1 于 payload 根）；旧 0.22.5 代 diff 已替换。
+- 内核构建链固化于 `port/hermes-work/build-026/`：codeload 直连拉 tag tar（github.com 被墙）→ 组装 stage（cp -al 硬链接）→ fnosdiffs 重放（`pm/downloader.py` 上游已漂移，3 站点手工移植见 port_downloader.py）→ uv venv（specs=旧 venv 110 包集×新 uv.lock 版本 + ruamel.yaml==0.18.16/clib + 上游 pyproject override-dependencies，见 mk_overrides.py）→ generate_icons → node-deps.mjs → tui.mjs/web.mjs（**必须 cd src 内跑**，babel 从 cwd 解析 react-compiler 插件）→ 摆放 products → fix_web_dist → build-pack.sh（hygiene_026 + delink_both + **lib64 假象树剔除** + prune_src[tests/apps/website] + stamp + fnpack）。
+- verify.py --tiers 0,1,2,4 ALL-PASS（45 项，verify-026a.log）；L2 真浏览器端到端零 4xx、WS/TUI 渲染通过；L4 启动器复现通过。
+- stamp_version.py 常量已更新：commit f0d94882 / date 1793635052（v0.22.6 tag）。
+- 包体 223M（0.22.5.7=241M）。md5 见 H空间交付时现算。**未交付未 push**：VM（192.168.30.30）fnOS 后端死（11-02 起，SSH 会话通道即断），待用户在虚拟机管理器重启后跑覆盖升级 + tier3。
