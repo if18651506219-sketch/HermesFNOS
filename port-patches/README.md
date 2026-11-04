@@ -84,3 +84,8 @@ verify.py L0 asserts all four fingerprints.
 - verify.py --tiers 0,1,2,4 ALL-PASS（45 项，verify-026a.log）；L2 真浏览器端到端零 4xx、WS/TUI 渲染通过；L4 启动器复现通过。
 - stamp_version.py 常量已更新：commit f0d94882 / date 1793635052（v0.22.6 tag）。
 - 包体 223M（0.22.5.7=241M）。md5 见 H空间交付时现算。**未交付未 push**：VM（192.168.30.30）fnOS 后端死（11-02 起，SSH 会话通道即断），待用户在虚拟机管理器重启后跑覆盖升级 + tier3。
+
+## 2026-11-04 0.22.6.1 VM 回归揪出打包 bug → 0.22.6.2（verify 全绿，VM 复验中）
+- **根因**：build-main.sh P6c 把 `out/tui/` 整目录拷进 `hermes_cli/tui_dist/`，产物 `dist/entry.js` 被嵌了一层；`main_tui_launch._find_bundled_tui` 只认 `tui_dist/entry.js` 顶层。后果=新装用户 CHAT 静默降级到 ui-tui **源码构建**路径（需 node+npm+联网重编），离线新装聊天必挂。**已发布的 0.22.5.7 同带此缺陷**（NAS 本机无恙只因运行时目录是开发期部署带的 entry.js）。
+- **上游正确语义**（scripts/build/agent.py plant_surfaces）：`tui/dist/*` 内容平铺进 `tui_dist/`，package.json 并列。build-main.sh P6c 已改平铺+断言 entry.js 存在；verify.py 新增 `L0.tui-bundled-entry` 静态断言（此前 45 项全绿仍漏包，因 verify 从不做包体 tui 布局检查）。
+- VM 验证顺序：VM 后端已被用户重启恢复；0.22.6.1 VM 装成后 tier5 聊天端到端（补 entry.js 后）state.db 实锤 `assistant='vmcheckE…'`；0.22.6.2 重打包 md5 8296cfa708bf48a2776d52436be9cdbd，verify ALL-PASS 143s，VM 覆盖安装+tier6（sqlite 断言版）进行中。

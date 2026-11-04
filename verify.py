@@ -174,6 +174,12 @@ def tier0():
     body = idx.read_text(errors='ignore') if idx else ''
     ok('L0.preload-prefix-fix', body.count('modulepreload') > 0 and 'return`/`+' not in body,
        f'index={idx.name if idx else None}')
+    # packaged chat TUI must resolve via tui_dist/entry.js at TOP LEVEL
+    # (main_tui_launch._find_bundled_tui). Nested dist/ under tui_dist = packaged
+    # build; chat silently falls back to ui-tui SOURCE build (needs npm+network).
+    td = t0 / 'src' / 'hermes_cli' / 'tui_dist'
+    ok('L0.tui-bundled-entry', (td / 'entry.js').is_file() and (td / 'package.json').is_file(),
+       'tui_dist/entry.js top-level missing -> fresh-install chat broken')
     syntax = [f.name for f in (SIM / 'cmd').iterdir() if sh(['bash', '-n', str(f)]).returncode]
     ok('L0.cmd-syntax', not syntax, str(syntax))
     sp = (t0 / 'sock_proxy.py').read_text(errors='ignore')
