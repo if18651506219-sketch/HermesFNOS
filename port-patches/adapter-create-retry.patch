@@ -1,6 +1,6 @@
 --- a/src/gateway/run_adapters.py
 +++ b/src/gateway/run_adapters.py
-@@ -1936,6 +1936,15 @@
+@@ -1743,6 +1743,15 @@
              from gateway.platform_registry import platform_registry
              if platform_registry.is_registered(platform.value):
                  adapter = platform_registry.create_adapter(platform.value, config)

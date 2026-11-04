@@ -1,6 +1,6 @@
 --- a/src/gateway/run_bootstrap.py
 +++ b/src/gateway/run_bootstrap.py
-@@ -696,12 +696,99 @@
+@@ -700,12 +700,99 @@
          logger.debug("early environment probe did not start", exc_info=True)
  
  
