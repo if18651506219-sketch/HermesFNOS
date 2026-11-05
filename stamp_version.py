@@ -5,25 +5,49 @@ Writes app/src/install-stamp.json so hermes_cli.version_info resolves
 base_version instead of "unknown" (dashboard vunknown fix).
 Must be re-run on every kernel bump with the new kernel version.
 
+fnOS-port 0.22.7.3: COMMIT/COMMIT_DATE/KERNEL are a single triple. Passing a
+kernel that does not match the stamped commit used to silently produce a
+package claiming "0.22.7" while carrying the 0.22.6 commit (verify.py L0 only
+checked that the commit was non-empty). Refuse that combination up front.
+
 usage: stamp_version.py <pkg_dir> <kernel_ver> <fnos_ver>
 """
 import json
+import os
 import sys
 from datetime import datetime, timezone
 
+# Update these THREE together on every upstream kernel bump.
+KERNEL = "0.22.7"
 COMMIT = "b200f5bc60e31588ba2cb60e288029c4a54ba5fa"  # upstream v0.22.7 tag
 COMMIT_DATE = 1793742781
 
+
 def main():
+    if len(sys.argv) != 4:
+        sys.exit("usage: stamp_version.py <pkg_dir> <kernel_ver> <fnos_ver>")
     pkg = sys.argv[1]
     kernel = sys.argv[2]
     fnos = sys.argv[3]
+    if kernel != KERNEL:
+        sys.exit("kernel %s != stamp KERNEL %s (COMMIT is the %s tag); "
+                 "update KERNEL/COMMIT/COMMIT_DATE together" % (kernel, KERNEL, KERNEL))
+    if not fnos.startswith(kernel + "."):
+        sys.exit("fnos version %s must start with '%s.' (kernel + fnOS revision)" % (fnos, kernel))
+
+    epoch = os.environ.get("SOURCE_DATE_EPOCH")
+    built = (datetime.fromtimestamp(int(epoch), timezone.utc).isoformat()
+             if epoch else datetime.now(timezone.utc).isoformat())
+    path = os.path.join(pkg, "app", "src", "install-stamp.json")
+    if not os.path.isdir(os.path.dirname(path)):
+        sys.exit("stamp target dir missing: " + os.path.dirname(path))
+
     stamp = {
         "schemaVersion": 2,
         "commit": COMMIT,
         "commitDate": COMMIT_DATE,
         "branch": None,
-        "builtAt": datetime.now(timezone.utc).isoformat(),
+        "builtAt": built,
         "dirty": False,
         "source": "ci",
         "distribution": None,
@@ -34,10 +58,10 @@ def main():
         "payload": "full",
         "tag": f"v{kernel}",
     }
-    path = f"{pkg}/app/src/install-stamp.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(stamp, f, indent=2)
-    print("wrote", path, "| baseVersion", kernel)
+    print("wrote", path, "| baseVersion", kernel, "| commit", COMMIT[:10])
+
 
 if __name__ == "__main__":
     main()

@@ -7,26 +7,36 @@
   L2 浏览器端到端   sock_proxy 桥 + headless chromium CDP：全响应无4xx、TUI渲染、WS建立
   L3 消息真往返     CDP 向 xterm 注入消息 -> agent 日志出现 inbound+API call+response ready，零401
   L4 崩溃类复现     官方启动器同款命令（-I + 弹三变量）gateway status exit 0
+  L5 代理行为回归   真 sock_proxy + 假上游：大 POST/分次写/伪造转发头/keep-alive/
+                    chunked 请求体/12s 空闲流（不需要 fpk，任何主机可跑）
 
-用法: python3 verify.py --tiers 0,1,4 [--keep]   (默认结束自动清理 sim/chromium)
+用法: python3 verify.py --tiers 0,1,2,4,5 [--keep]   (默认结束自动清理 sim/chromium)
+环境: HERMES_PROD_PORTS=9119,19119 声明实机在跑的生产端口（否则 prod-untouched 记 SKIP）
+      HERMES_KEY_ENV / HERMES_ENGINE_API_KEY / HERMES_ENGINE_URL / HERMES_MODEL
 铁律: 绝不触碰生产实例（9119 及 hermes-si.sock）；sim 用独立端口/目录。
 """
-import argparse, json, os, queue, re, shutil, socket, subprocess, sys, threading, time
+import argparse, hashlib, json, os, queue, re, shutil, socket, subprocess, sys, tarfile, threading, time
 from pathlib import Path
 
-sys.path.insert(0, '/vol2/@apphome/hermes-si/data/hermes-home/port/hermes-work/wsvenv/lib/python3.11/site-packages')
-import websocket  # websocket-client
+# fnOS-port 0.22.7.1: websocket-client is only needed by the CDP tiers (2/3).
+# The old top-level import + hard-coded /vol2/.../site-packages path made even
+# `--tiers 0,1,4` crash on any host other than the build NAS.
+def cdp_websocket():
+    import websocket
+    return websocket
 
 HERE = Path(__file__).resolve().parent
 SIM = HERE / 'sim'
 FPK = HERE / 'pkg' / 'hermes-si.fpk'
 PREFIX = '/app/hermes-si'
-KEY_ENV = '/vol2/@apphome/hermes-agent/data/.env'
-KEY_NAME = 'CUSTOM_UMV4M5OPLH7KI_API_KEY'
-ENGINE = 'http://127.0.0.1:8080/v1'
-MODEL = 'qwen3.8-flash-next-iq3_s'
+KEY_ENV = os.environ.get('HERMES_KEY_ENV', '/vol2/@apphome/hermes-agent/data/.env')
+KEY_NAME = os.environ.get('HERMES_KEY_NAME', 'CUSTOM_UMV4M5OPLH7KI_API_KEY')
+ENGINE = os.environ.get('HERMES_ENGINE_URL', 'http://127.0.0.1:8080/v1')
+MODEL = os.environ.get('HERMES_MODEL', 'qwen3.8-flash-next-iq3_s')
 PROD_PORT = '9119'  # 遗留：hermes-si fpk 生产实例端口（此 NAS 未装 hermes-si 时不存在）
-PROD_PORTS_LIVE = ('9119', '19119')  # 实机在跑的生产 dashboard（hermes-si 实测 9119 + trim.hermes 19119），断言不许被 harness 波及
+# Set HERMES_PROD_PORTS=9119,19119 on hosts that actually run a live production
+# dashboard; otherwise the prod-untouched checks are SKIP instead of FAIL.
+PROD_PORTS_LIVE = tuple(x.strip() for x in os.environ.get('HERMES_PROD_PORTS', '').split(',') if x.strip())
 FAILS = []
 
 def ok(tag, cond, detail=''):
@@ -35,10 +45,21 @@ def ok(tag, cond, detail=''):
         FAILS.append(tag)
 
 def engine_key():
-    for line in open(KEY_ENV):
-        if line.upper().startswith(KEY_NAME):
-            return line.split('=', 1)[1].strip()
-    raise SystemExit('engine key missing in .env')
+    # Loopback engines usually ignore the key. Do not abort L0/L1/L4 just
+    # because the build NAS's .env is absent on this host.
+    if os.environ.get('HERMES_ENGINE_API_KEY'):
+        return os.environ['HERMES_ENGINE_API_KEY']
+    if os.path.isfile(KEY_ENV):
+        for line in open(KEY_ENV):
+            if line.upper().startswith(KEY_NAME):
+                return line.split('=', 1)[1].strip()
+    return 'local'
+
+def prod_untouched(tag):
+    if not PROD_PORTS_LIVE:
+        print('SKIP ' + tag + ' | HERMES_PROD_PORTS not set (no live prod instance assumed)')
+        return
+    ok(tag, all(port_up(p) for p in PROD_PORTS_LIVE), 'live prod dashboards alive')
 
 def free_port(base):
     for p in range(base, base + 30):
@@ -141,12 +162,28 @@ def log_lines(port, token, limit=500):
 
 # ---------- L0 ----------
 def tier0():
-    ver = re.search(r'^version\s*=\s*(\S+)', sh(['tar', '-xOf', str(FPK), 'manifest']).stdout, re.M).group(1)
-    ok('L0.manifest-version', bool(ver), ver)
+    mtxt = sh(['tar', '-xOf', str(FPK), 'manifest']).stdout
+    m = re.search(r'^version\s*=\s*"?([^"\s]+)"?', mtxt, re.M)
+    ver = m.group(1) if m else ''
+    ok('L0.manifest-version', bool(ver), ver or 'manifest missing or version not found')
     stale = (not (SIM / 'app.tgz').is_file()) or (SIM / 'app.tgz').stat().st_mtime < FPK.stat().st_mtime
     if stale:
         sh(['rm', '-rf', str(SIM)])
+        SIM.mkdir(parents=True, exist_ok=True)
         sh(['tar', '-xzf', str(FPK), '-C', str(SIM)])
+    # fnOS verifies manifest.checksum == MD5(app.tgz) at install time. A
+    # re-sealed package that drops this field (or keeps the old value) is
+    # rejected by the app center even though every other L0 assertion is green.
+    # Compute from the fpk itself so this check never depends on sim/ state.
+    mc = re.search(r'^checksum\s*=\s*([0-9a-f]{32})\s*$', mtxt, re.M)
+    h = hashlib.md5()
+    with tarfile.open(FPK, 'r:gz') as tf:
+        f = tf.extractfile('app.tgz')
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    app_md5 = h.hexdigest()
+    ok('L0.manifest-checksum', bool(mc) and mc.group(1) == app_md5,
+       'manifest=%s app.tgz=%s' % (mc.group(1) if mc else 'MISSING', app_md5))
     links = sh(['tar', '-tzf', str(SIM / 'app.tgz')]).stdout
     n_link = sum(1 for l in links.splitlines() if l.count(':') > 1)
     ok('L0.zero-inner-links', n_link == 0, f'link-entries={n_link}')
@@ -165,6 +202,17 @@ def tier0():
        and bool(stamp.get('baseVersion')) and bool(stamp.get('commit'))
        and set(str(stamp.get('commit'))) != {'0'},
        f"base={stamp.get('baseVersion')} display={stamp.get('displayVersion')}")
+    # fnOS-port 0.22.7.1: a stale stamp otherwise ships a package claiming
+    # the NEW kernel while carrying the OLD commit. The old assertions only
+    # checked that commit was non-empty, so this mismatch passed unnoticed.
+    kernel = '.'.join(ver.split('.')[:3])
+    sc = re.search(r'^COMMIT\s*=\s*"([0-9a-f]{7,40})"',
+                   (HERE / 'stamp_version.py').read_text(errors='ignore'), re.M)
+    ok('L0.version-consistency',
+       bool(ver) and stamp.get('baseVersion') == kernel
+       and bool(sc) and stamp.get('commit') == sc.group(1),
+       f"manifest={ver} kernel={kernel} base={stamp.get('baseVersion')} "
+       f"commit={str(stamp.get('commit'))[:10]} writer={sc.group(1)[:10] if sc else 'missing'}")
     uicfgs = [p for p in SIM.rglob('config') if p.parent.name == 'ui']
     uitxts = [p.read_text(errors='ignore') for p in uicfgs]
     ok('L0.ui-title', len(uicfgs) >= 1 and all('"Hermes FNOS"' in t for t in uitxts)
@@ -246,7 +294,7 @@ def tier1():
     sim_stop()
     time.sleep(3)
     ok('L1.stop+status-3', sim_status() == 3 and not port_up(port))
-    ok('L1.prod-untouched', all(port_up(p) for p in PROD_PORTS_LIVE), 'live prod dashboards alive')
+    prod_untouched('L1.prod-untouched')
     (SIM / 'port').write_text(str(port))
 
 # ---------- bridge + CDP ----------
@@ -300,7 +348,7 @@ class CDP:
             target = json.loads(raw)[0]
         else:
             target = json.loads(sh(['curl', '-s', f'http://127.0.0.1:{port}/json/list']).stdout)[0]
-        self.ws = websocket.create_connection(target['webSocketDebuggerUrl'],
+        self.ws = cdp_websocket().create_connection(target['webSocketDebuggerUrl'],
                                               suppress_origin=True, max_size=None, timeout=60)
         def rd():
             while True:
@@ -508,7 +556,7 @@ def tier3():
     srv.close()
     sim_stop()
     time.sleep(3)
-    ok('L3.prod-untouched', all(port_up(p) for p in PROD_PORTS_LIVE), 'live prod dashboards alive')
+    prod_untouched('L3.prod-untouched')
 
 # ---------- L4 ----------
 def tier4():
@@ -526,6 +574,25 @@ def tier4():
     ok('L4.launcher-repro-no-import-error', 'No module named' not in out and r.returncode == 0,
        out.strip().splitlines()[-1] if out.strip() else 'empty')
 
+# ---------- L5 ----------
+def tier5():
+    """Real proxy behaviour regression: complete request bodies, sanitized
+    forwarded headers, keep-alive, chunked requests, idle stream survival.
+    Needs no fpk and no build NAS paths, so it can run anywhere."""
+    p = HERE / 'scripts' / 'verify_proxy.py'
+    if not p.is_file():
+        ok('L5.proxy-behaviour', False, 'scripts/verify_proxy.py missing')
+        return
+    try:
+        r = sh([sys.executable, str(p)], timeout=180)
+    except Exception as e:
+        ok('L5.proxy-behaviour', False, repr(e))
+        return
+    for line in (r.stdout + r.stderr).strip().splitlines():
+        print('  | ' + line)
+    ok('L5.proxy-behaviour', r.returncode == 0, 'scripts/verify_proxy.py')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--tiers', default='0,1,2,3,4')
@@ -535,7 +602,7 @@ def main():
     kill_orphan_sims()
     t0 = time.time()
     for t in tiers:
-        {0: tier0, 1: tier1, 2: tier2, 3: tier3, 4: tier4}[t]()
+        {0: tier0, 1: tier1, 2: tier2, 3: tier3, 4: tier4, 5: tier5}[t]()
     if not a.keep:
         kill_orphan_sims()
         shutil.rmtree(SIM, ignore_errors=True)

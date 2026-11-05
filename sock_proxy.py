@@ -12,12 +12,20 @@ present. So this proxy deliberately does NOT touch response bodies — it only:
   * sets `Host: 127.0.0.1:<port>` (the dashboard enforces a Host-header check
     against the bound loopback host — DNS-rebinding guard GHSA-ppp5-vxwm-4cf7)
     and adds `X-Forwarded-Prefix: <prefix>`,
-  * forwards WebSocket upgrade requests (chat PTY at /api/pty) verbatim as an
-    unbuffered bidirectional tunnel, preserving Upgrade/Connection headers,
+  * forwards the COMPLETE request body (content-length or chunked), including
+    bodies split across writes or larger than one recv(),
+  * forwards WebSocket upgrade requests verbatim as an unbuffered bidirectional
+    tunnel, preserving Upgrade/Connection headers,
   * streams responses exactly (content-length or verbatim chunked) over a real
     HTTP/1.1 keep-alive loop so browser connection reuse never crosses
     responses,
   * keeps SSE (/api/...) streaming unbuffered with no read timeout.
+
+fnOS-port fix 0.22.7.1: timeouts are per phase, not per socket.
+`socket.create_connection(timeout=10)` leaves a 10s timeout on the socket,
+so the old code truncated any idle SSE/WebSocket stream after 10s (recv raised
+socket.timeout, which the pumps treated as EOF). Response HEAD waits are now
+bounded, and both sockets are switched to blocking mode before any streaming.
 
 usage: sock_proxy.py <unix-socket-path> <tcp-port> [gateway-prefix]
 """
@@ -32,8 +40,11 @@ PREFIX = (sys.argv[3] if len(sys.argv) > 3 else "/app/hermes-si").encode()
 PREFIX_STR = PREFIX.decode()
 BACKLOG = 128
 CHUNK = 65536
-IDLE_TIMEOUT = 300                # dashboard holds SSE/WS-adjacent connections quiet a long time
+IDLE_TIMEOUT = 300             # dashboard holds SSE/WS-adjacent connections quiet a long time
+REQ_BODY_TIMEOUT = 120         # client must finish sending a declared request body
+RESP_HEAD_TIMEOUT = 120        # upstream must produce response headers; body phase is unbounded
 DEBUG = os.environ.get("HERMES_SI_PROXY_DEBUG") == "1"
+
 
 def dlog(msg):
     if DEBUG:
@@ -41,13 +52,15 @@ def dlog(msg):
         sys.stderr.flush()
 
 
-def recv_head(sock, timeout):
-    head = b""
+def recv_head(sock, timeout, initial=b""):
+    """Read one header block. `initial` carries bytes already read (e.g. a
+    pipelined next request left over from a previous request body)."""
+    head = initial
     sock.settimeout(timeout)
     while b"\r\n\r\n" not in head:
         try:
             d = sock.recv(4096)
-        except socket.timeout:
+        except OSError:
             return None, None, None
         if not d:
             return None, None, None
@@ -87,8 +100,11 @@ def pump_exact(src, dst, initial=b"", limit=None):
     sent = 0
     try:
         if initial:
-            dst.sendall(initial)
-            sent += len(initial)
+            if limit is not None:
+                initial = initial[:max(0, limit - sent)]
+            if initial:
+                dst.sendall(initial)
+                sent += len(initial)
         while limit is None or sent < limit:
             want = CHUNK if limit is None else min(CHUNK, limit - sent)
             d = src.recv(want)
@@ -105,7 +121,7 @@ def pump_bidir(a, b, initial_for_b=b""):
     """raw tunnel: copy a->b and b->a until both EOF; returns when either direction fully drains."""
     for s in (a, b):
         try:
-            s.settimeout(None)  # 0.22.7.2: WS tunnel is long-lived; clear header-phase timeouts
+            s.settimeout(None)      # WS frames may be many minutes apart
         except OSError:
             pass
 
@@ -188,60 +204,6 @@ def pump_chunked_forward(reader, dst):
         pass
 
 
-def forward_client_body(conn, up, hmap, rest):
-    """Relay the client request body to upstream verbatim (chunked framing kept
-    intact, or exactly Content-Length bytes). Returns True on complete body."""
-    if b"chunked" in hmap.get(b"transfer-encoding", b""):
-        buf = rest
-        while True:
-            j = buf.find(b"\r\n")
-            while j < 0:
-                try:
-                    d = conn.recv(CHUNK)
-                except OSError:
-                    return False
-                if not d:
-                    return False
-                buf += d
-                j = buf.find(b"\r\n")
-            try:
-                n = int(buf[:j], 16)
-            except ValueError:
-                return False
-            end = j + 2 + n + 2
-            while len(buf) < end:
-                try:
-                    d = conn.recv(CHUNK)
-                except OSError:
-                    return False
-                if not d:
-                    return False
-                buf += d
-            try:
-                up.sendall(buf[:end])
-            except OSError:
-                return False
-            buf = buf[end:]
-            if n == 0:
-                return True
-    cl = hmap.get(b"content-length", b"")
-    if cl.isdigit():
-        n = max(int(cl) - len(rest), 0)
-        while n > 0:
-            try:
-                d = conn.recv(min(CHUNK, n))
-            except OSError:
-                return False
-            if not d:
-                return False
-            try:
-                up.sendall(d)
-            except OSError:
-                return False
-            n -= len(d)
-    return True
-
-
 def send_error(conn, code, text):
     body = text.encode()
     try:
@@ -270,22 +232,100 @@ def _set_keepalive(sock):
                 pass
 
 
+def _pump_chunked_request(conn, up, initial):
+    """Forward a chunked REQUEST body verbatim (size lines + data + CRLF),
+    stopping after the terminating 0-chunk / trailers. Return leftover bytes."""
+    buf = initial
+    try:
+        while True:
+            while b"\r\n" not in buf:
+                d = conn.recv(4096)
+                if not d:
+                    return b""
+                buf += d
+            size_line, _, rest = buf.partition(b"\r\n")
+            try:
+                n = int(size_line.split(b";", 1)[0], 16)
+            except ValueError:
+                up.sendall(size_line + b"\r\n")
+                return rest
+            up.sendall(size_line + b"\r\n")
+            buf = rest
+            if n == 0:
+                # No data follows the 0-chunk: forward trailer lines verbatim
+                # until the terminating empty line. Do NOT block waiting for
+                # another \r\n\r\n here — the empty line is usually already in
+                # buf, and waiting would deadlock the client.
+                while True:
+                    idx = buf.find(b"\r\n")
+                    if idx >= 0:
+                        up.sendall(buf[:idx + 2])
+                        buf = buf[idx + 2:]
+                        if idx == 0:
+                            return buf
+                        continue
+                    d = conn.recv(4096)
+                    if not d:
+                        return b""
+                    buf += d
+            need = n + 2                       # chunk data + trailing CRLF
+            while len(buf) < need:
+                d = conn.recv(min(CHUNK, need - len(buf)))
+                if not d:
+                    return b""
+                buf += d
+            up.sendall(buf[:need])
+            buf = buf[need:]
+    except OSError:
+        return b""
+
+
+def forward_request_body(conn, up, rest, hmap):
+    """Forward the COMPLETE request body. Bytes beyond the declared body belong
+    to a pipelined next request and are returned for the next loop iteration."""
+    try:
+        conn.settimeout(REQ_BODY_TIMEOUT)
+        if b"chunked" in hmap.get(b"transfer-encoding", b""):
+            return _pump_chunked_request(conn, up, rest)
+        try:
+            n = int(hmap.get(b"content-length", b"0"))
+        except ValueError:
+            return rest
+        if n <= 0:
+            return rest
+        take = min(n, len(rest))
+        if take:
+            up.sendall(rest[:take])
+        remaining = n - take
+        while remaining > 0:
+            d = conn.recv(min(CHUNK, remaining))
+            if not d:
+                break
+            up.sendall(d)
+            remaining -= len(d)
+        return rest[take:]
+    except OSError:
+        return b""
+
+
 def handle(conn):
     try:
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except OSError:
         pass
     _set_keepalive(conn)
-    keep = True
+    pending = b""
     try:
-        while keep:
-            line, headers, rest = recv_head(conn, IDLE_TIMEOUT)
+        while True:
+            line, headers, rest = recv_head(conn, IDLE_TIMEOUT, pending)
+            pending = b""
             if line is None:
                 return
             hmap = header_map(headers)
             method = line.split(b" ", 1)[0].upper()
             client_conn = hmap.get(b"connection", b"")
-            client_close = client_conn == b"close" or (b"http/1.0" in line.lower() and client_conn != b"keep-alive")
+            client_close = b"close" in client_conn or (b"http/1.0" in line.lower() and client_conn != b"keep-alive")
+            expect_continue = b"100-continue" in hmap.get(b"expect", b"")
 
             # WebSocket upgrade: tunnel raw, keep Upgrade/Connection verbatim.
             is_upgrade = b"upgrade" in hmap and b"websocket" in hmap.get(b"upgrade", b"") or b"websocket" in hmap.get(b"connection", b"")
@@ -296,15 +336,17 @@ def handle(conn):
                 low = h.lower()
                 if low.startswith(b"host:"):
                     continue
-                if low.startswith((b"x-forwarded-", b"expect:")):
-                    # fnOS-port 0.22.7.2: client-supplied X-Forwarded-* must not
-                    # shadow our trusted values; Expect is answered by us below.
+                # The proxy is the trust boundary: a client-supplied
+                # X-Forwarded-* would otherwise be duplicated and, depending on
+                # the upstream's first-header-wins lookup, could override the
+                # SPA base path / host / client IP.
+                if low.startswith((b"x-forwarded-", b"forwarded:")):
+                    continue
+                if expect_continue and low.startswith(b"expect:"):
                     continue
                 if is_upgrade:
                     # Origin/Referer from the fnOS gateway host would fail the
-                    # dashboard's loopback Host/Origin rebinding guard; the proxy
-                    # is the trusted boundary (loopback-only socket + fnOS auth),
-                    # so strip web-origin headers like the strata port does.
+                    # dashboard's loopback Host/Origin rebinding guard.
                     if low.startswith((b"origin:", b"referer:")):
                         continue
                     out_headers.append(h)  # Upgrade/Connection must survive for the handshake
@@ -324,32 +366,22 @@ def handle(conn):
                 up.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 head_bytes = b"\r\n".join([up_line] + out_headers) + b"\r\n\r\n"
                 up.sendall(head_bytes)
-                # fnOS-port 0.22.7.2: forward the FULL request body. Previously
-                # only whatever shared the last recv(4096) with the headers was
-                # relayed, so POSTs >4KB (config save, upload) hung upstream.
-                has_body = (b"chunked" in hmap.get(b"transfer-encoding", b"")
-                            or hmap.get(b"content-length", b"").isdigit())
-                if rest and not has_body:
-                    up.sendall(rest)
-                if not is_upgrade:
-                    if hmap.get(b"expect", b"") == b"100-continue":
-                        try:
-                            conn.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
-                        except OSError:
-                            return
-                    if has_body and not forward_client_body(conn, up, hmap, rest):
-                        return
+                if expect_continue:
+                    # Answer the client's expectation ourselves so it releases
+                    # the body; the upstream never sees Expect and won't send
+                    # its own 100 (which would deadlock the old 1xx recursion).
+                    conn.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+                pending = forward_request_body(conn, up, rest, hmap)
 
                 if is_upgrade:
-                    rline, rheaders, rrest = recv_head(up, 20)
+                    rline, rheaders, rrest = recv_head(up, RESP_HEAD_TIMEOUT)
                     if rline is None:
-                        send_error(conn, 502, "Bad Gateway")
+                        send_error(conn, 504, "Gateway Timeout")
                         return
-                    # 101 handshake: forward verbatim, then tunnel both directions raw.
                     conn.sendall(b"\r\n".join([rline] + rheaders) + b"\r\n\r\n" + rrest)
                     pump_bidir(conn, up)
                     return  # connection fully consumed by the tunnel
-                keep = forward_http(conn, up, rline_holder=None, client_close=client_close)
+                keep = forward_http(conn, up, client_close=client_close)
             except OSError as e:
                 dlog("upstream error: %s" % e)
                 send_error(conn, 502, "Bad Gateway")
@@ -369,26 +401,33 @@ def handle(conn):
             pass
 
 
-def forward_http(conn, up, rline_holder, client_close):
+def forward_http(conn, up, client_close=False, sent_any=False):
     """forward one HTTP response from up to conn; return True to keep the client connection alive."""
-    rline, rheaders, rrest = recv_head(up, None)
+    rline, rheaders, rrest = recv_head(up, RESP_HEAD_TIMEOUT)
     if rline is None:
+        if not sent_any:
+            send_error(conn, 504, "Gateway Timeout")
         return False
     hmap = header_map(rheaders)
     status = rline.split(b" ", 2)
     is_1xx = len(status) > 1 and status[1].isdigit() and 100 <= int(status[1]) < 200
     if is_1xx:
         conn.sendall(b"\r\n".join([rline] + rheaders) + b"\r\n\r\n")
-        return forward_http(conn, up, None, client_close)
+        return forward_http(conn, up, client_close, True)
+
+    # Headers are in: streaming (SSE, chunked, long-poll, file download) must
+    # never inherit a socket timeout. Clear it on BOTH ends before pumping.
+    try:
+        up.settimeout(None)
+        conn.settimeout(None)
+    except OSError:
+        pass
 
     out = []
     close = client_close
     for h in rheaders:
         low = h.lower()
         if low.startswith((b"connection:", b"keep-alive:", b"proxy-connection:")):
-            continue
-        if low.startswith(b"transfer-encoding:") and b"chunked" in low:
-            out.append(h)
             continue
         out.append(h)
     body_mode = "chunked" if b"chunked" in hmap.get(b"transfer-encoding", b"") else ("length" if b"content-length" in hmap else "close")
@@ -400,13 +439,16 @@ def forward_http(conn, up, rline_holder, client_close):
         out.append(b"Connection: close")
     conn.sendall(b"\r\n".join([rline] + out) + b"\r\n\r\n")
 
-    if body_mode == "chunked":
-        pump_chunked_forward(ChunkReader(up, rrest), conn)
-    elif body_mode == "length":
-        n = int(hmap[b"content-length"])
-        pump_exact(up, conn, initial=rrest, limit=n)
-    else:
-        pump_exact(up, conn, initial=rrest, limit=None)
+    try:
+        if body_mode == "chunked":
+            pump_chunked_forward(ChunkReader(up, rrest), conn)
+        elif body_mode == "length":
+            n = int(hmap[b"content-length"])
+            pump_exact(up, conn, initial=rrest, limit=n)
+        else:
+            pump_exact(up, conn, initial=rrest, limit=None)
+    except (ValueError, OSError):
+        pass
     return not close
 
 
