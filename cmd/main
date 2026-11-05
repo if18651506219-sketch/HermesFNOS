@@ -86,9 +86,14 @@ seed_config() {
             model=$(echo "$base" | sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
         fi
         cat > "${HERMES_HOME_DIR}/config.yaml" <<EOF
-model: ${model:-local}
-provider: custom
-base_url: http://127.0.0.1:8080/v1
+model:
+  provider: custom
+  default: ${model:-local}
+providers:
+  custom:
+    base_url: http://127.0.0.1:8080/v1
+    default_model: ${model:-local}
+    api_mode: chat_completions
 EOF
         log_msg "seeded config.yaml (model=${model:-local})"
     fi
@@ -110,17 +115,24 @@ seed_persona() {
     fi
 }
 
+systemctl_user_out() {
+    # fnOS-port 0.22.7.2: stdout-preserving variant; the swallowing variant
+    # made `systemctl_user list-units | awk` permanently empty, so orphaned
+    # gateway units were never reaped.
+    local u
+    u=$(id -u)
+    [ -S "/run/user/${u}/bus" ] || return 0
+    XDG_RUNTIME_DIR="/run/user/${u}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${u}/bus" \
+        systemctl --user "$@" 2>/dev/null || true
+}
+
 systemctl_user() {
     # fnOS-port P0-1/P0-2: drive the upstream systemd-user gateway unit
     # (hermes-gateway-<hash>.service). The dashboard installs it as a user
     # service; our pidfiles do not cover it, so stop/start must manage it or
     # an orphaned "gateway run" keeps holding gateway_state.json (stale fatal
     # in the UI after an app-center restart).
-    local u
-    u=$(id -u)
-    [ -S "/run/user/${u}/bus" ] || return 0
-    XDG_RUNTIME_DIR="/run/user/${u}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${u}/bus" \
-        systemctl --user "$@" >/dev/null 2>&1 || true
+    systemctl_user_out "$@" >/dev/null 2>&1 || true
 }
 
 reap_gateway() {
@@ -129,7 +141,7 @@ reap_gateway() {
     # respawns its gateway (unmanaged); if a systemd-user unit coexists, both
     # owners fight over gateway.lock and Restart=always storms (~every 26s the
     # losing attempt exits non-zero, breaking chat connections). Uninstall it.
-    for un in $(systemctl_user list-units --all --no-legend 'hermes-gateway-*' | awk '{print $1}'); do
+    for un in $(systemctl_user_out list-units --all --no-legend 'hermes-gateway-*' | awk '{print $1}'); do
         systemctl_user stop "$un"
         systemctl_user disable "$un"
     done
@@ -184,7 +196,7 @@ start_process() {
     for uf in "${HERMES_HOME_DIR}/.config/systemd/user/"hermes-gateway-*.service; do
         [ -f "$uf" ] || continue
         un=$(basename "$uf")
-        ex=$(systemctl_user show "$un" -p ExecStart | tr ';' '\n' | grep -m1 -oE 'path=[^ ]+' | cut -d= -f2)
+        ex=$(systemctl_user_out show "$un" -p ExecStart | tr ';' '\n' | grep -m1 -oE 'path=[^ ]+' | cut -d= -f2)
         if [ -z "$ex" ]; then
             ex=$(grep -m1 '^ExecStart=' "$uf" | awk '{print $2}' | tr -d '"')
         fi
@@ -242,9 +254,13 @@ start_process() {
         export HERMES_NODE="${node}"
     fi
     # engine key for the 8080 worker (written by install_callback when readable)
+    # fnOS-port 0.22.7.2: actually read the file; the old branch only tested
+    # existence and exported the placeholder, so engine_key never took effect.
+    ENGINE_KEY=""
     if [ -f "${APP_HOME}/engine_key" ]; then
-        export OPENAI_API_KEY="***/bin/123"
+        ENGINE_KEY=$(head -c 4096 "${APP_HOME}/engine_key" | tr -d '\r\n')
     fi
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-${ENGINE_KEY:-sk-local-123}}"
 
     ( cd "${TRIM_APPDEST}/src" && \
       exec "${TRIM_APPDEST}/python314/bin/python3.14" -m hermes_cli.main dashboard \
@@ -261,7 +277,10 @@ start_process() {
         sleep 1
     done
     if [ "${ready}" != "1" ]; then
+        # fnOS-port 0.22.7.2: a failed start must not report success (fnOS UI
+        # showed a healthy app with nothing listening).
         log_msg "dashboard did not bind port ${port} in 40s"
+        return 1
     fi
 
     ( exec /usr/bin/python3 \
@@ -300,6 +319,13 @@ stop_process() {
 
 status() {
     if running; then
+        # fnOS-port 0.22.7.2: pidfiles alone are false-green; require the
+        # dashboard to actually answer HTTP on its current port.
+        local port
+        port=$(cat "${HTTP_PORT_FILE}" 2>/dev/null)
+        if [ -n "${port}" ]; then
+            curl -s -m 3 -o /dev/null "http://127.0.0.1:${port}/" 2>/dev/null || return 1
+        fi
         return 0
     fi
     return 1

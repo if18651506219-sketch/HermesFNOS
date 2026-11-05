@@ -103,6 +103,12 @@ def pump_exact(src, dst, initial=b"", limit=None):
 
 def pump_bidir(a, b, initial_for_b=b""):
     """raw tunnel: copy a->b and b->a until both EOF; returns when either direction fully drains."""
+    for s in (a, b):
+        try:
+            s.settimeout(None)  # 0.22.7.2: WS tunnel is long-lived; clear header-phase timeouts
+        except OSError:
+            pass
+
     def copy(src, dst, initial=b""):
         try:
             if initial:
@@ -182,6 +188,60 @@ def pump_chunked_forward(reader, dst):
         pass
 
 
+def forward_client_body(conn, up, hmap, rest):
+    """Relay the client request body to upstream verbatim (chunked framing kept
+    intact, or exactly Content-Length bytes). Returns True on complete body."""
+    if b"chunked" in hmap.get(b"transfer-encoding", b""):
+        buf = rest
+        while True:
+            j = buf.find(b"\r\n")
+            while j < 0:
+                try:
+                    d = conn.recv(CHUNK)
+                except OSError:
+                    return False
+                if not d:
+                    return False
+                buf += d
+                j = buf.find(b"\r\n")
+            try:
+                n = int(buf[:j], 16)
+            except ValueError:
+                return False
+            end = j + 2 + n + 2
+            while len(buf) < end:
+                try:
+                    d = conn.recv(CHUNK)
+                except OSError:
+                    return False
+                if not d:
+                    return False
+                buf += d
+            try:
+                up.sendall(buf[:end])
+            except OSError:
+                return False
+            buf = buf[end:]
+            if n == 0:
+                return True
+    cl = hmap.get(b"content-length", b"")
+    if cl.isdigit():
+        n = max(int(cl) - len(rest), 0)
+        while n > 0:
+            try:
+                d = conn.recv(min(CHUNK, n))
+            except OSError:
+                return False
+            if not d:
+                return False
+            try:
+                up.sendall(d)
+            except OSError:
+                return False
+            n -= len(d)
+    return True
+
+
 def send_error(conn, code, text):
     body = text.encode()
     try:
@@ -236,6 +296,10 @@ def handle(conn):
                 low = h.lower()
                 if low.startswith(b"host:"):
                     continue
+                if low.startswith((b"x-forwarded-", b"expect:")):
+                    # fnOS-port 0.22.7.2: client-supplied X-Forwarded-* must not
+                    # shadow our trusted values; Expect is answered by us below.
+                    continue
                 if is_upgrade:
                     # Origin/Referer from the fnOS gateway host would fail the
                     # dashboard's loopback Host/Origin rebinding guard; the proxy
@@ -260,8 +324,21 @@ def handle(conn):
                 up.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 head_bytes = b"\r\n".join([up_line] + out_headers) + b"\r\n\r\n"
                 up.sendall(head_bytes)
-                if rest:
+                # fnOS-port 0.22.7.2: forward the FULL request body. Previously
+                # only whatever shared the last recv(4096) with the headers was
+                # relayed, so POSTs >4KB (config save, upload) hung upstream.
+                has_body = (b"chunked" in hmap.get(b"transfer-encoding", b"")
+                            or hmap.get(b"content-length", b"").isdigit())
+                if rest and not has_body:
                     up.sendall(rest)
+                if not is_upgrade:
+                    if hmap.get(b"expect", b"") == b"100-continue":
+                        try:
+                            conn.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+                        except OSError:
+                            return
+                    if has_body and not forward_client_body(conn, up, hmap, rest):
+                        return
 
                 if is_upgrade:
                     rline, rheaders, rrest = recv_head(up, 20)
