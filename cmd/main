@@ -77,26 +77,40 @@ find_node() {
 seed_config() {
     # First-run: point the agent at the resident local OpenAI-compatible
     # engine on 127.0.0.1:8080 (trim.hermes Strata worker / any llama.cpp-style
-    # server). Model name is read live from /v1/models when reachable.
-    # Everything stays user-editable afterwards through the dashboard Settings.
-    if [ ! -f "${HERMES_HOME_DIR}/config.yaml" ]; then
-        local model="" base=""
-        base=$(curl -sf --max-time 2 http://127.0.0.1:8080/health 2>/dev/null)
-        if [ -n "$base" ]; then
-            model=$(echo "$base" | sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-        fi
-        cat > "${HERMES_HOME_DIR}/config.yaml" <<EOF
+    # server). Everything stays user-editable afterwards through Settings.
+    #
+    # fnOS-port 0.22.7.1: use the SAME nested config shape that verify.py's
+    # write_sim_config() has proven in L1/L2/L3. The old flat
+    # "model:/provider:/base_url:" seed was never exercised by any tier (L1
+    # overwrites config.yaml before start) and disagrees with the upstream
+    # provider schema. Also inject the key that install_callback extracted —
+    # it used to be written to disk and then never passed to the process.
+    [ -f "${HERMES_HOME_DIR}/config.yaml" ] && return 0
+    local model="" key="" health
+    health=$(curl -sf --max-time 2 http://127.0.0.1:8080/health 2>/dev/null)
+    if [ -n "$health" ]; then
+        model=$(echo "$health" | sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    fi
+    [ -n "$model" ] || model="local"
+    if [ -s "${APP_HOME}/engine_key" ]; then
+        key=$(head -n 1 "${APP_HOME}/engine_key" | tr -d '\r\n')
+    fi
+    # quote/escape values so a key containing ':' or '#' cannot break YAML
+    model=$(echo "$model" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    key=$(echo "$key" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    cat > "${HERMES_HOME_DIR}/config.yaml" <<EOF
 model:
   provider: custom
-  default: ${model:-local}
+  default: "${model}"
 providers:
   custom:
     base_url: http://127.0.0.1:8080/v1
-    default_model: ${model:-local}
+    api_key: "${key}"
+    default_model: "${model}"
     api_mode: chat_completions
 EOF
-        log_msg "seeded config.yaml (model=${model:-local})"
-    fi
+    chmod 600 "${HERMES_HOME_DIR}/config.yaml" 2>/dev/null
+    log_msg "seeded config.yaml (model=${model}, key=$([ -n "$key" ] && echo present || echo absent))"
 }
 
 seed_persona() {
@@ -115,24 +129,27 @@ seed_persona() {
     fi
 }
 
+systemctl_user() {
+    # fnOS-port P0-1/P0-2: drive the upstream systemd-user gateway unit
+    # (hermes-gateway-<hash>.service). Fire-and-forget variant: stdout is
+    # discarded on purpose (stop/disable/daemon-reload).
+    local u
+    u=$(id -u)
+    [ -S "/run/user/${u}/bus" ] || return 0
+    XDG_RUNTIME_DIR="/run/user/${u}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${u}/bus" \
+        systemctl --user "$@" >/dev/null 2>&1 || true
+}
+
 systemctl_user_out() {
-    # fnOS-port 0.22.7.2: stdout-preserving variant; the swallowing variant
-    # made `systemctl_user list-units | awk` permanently empty, so orphaned
-    # gateway units were never reaped.
+    # fnOS-port 0.22.7.1: callers parsing stdout MUST use this variant. The
+    # quiet wrapper above used to swallow `list-units` / `show`, so the unit
+    # enumeration and ExecStart probe always saw an empty string and the
+    # stop/disable loop was dead code.
     local u
     u=$(id -u)
     [ -S "/run/user/${u}/bus" ] || return 0
     XDG_RUNTIME_DIR="/run/user/${u}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${u}/bus" \
         systemctl --user "$@" 2>/dev/null || true
-}
-
-systemctl_user() {
-    # fnOS-port P0-1/P0-2: drive the upstream systemd-user gateway unit
-    # (hermes-gateway-<hash>.service). The dashboard installs it as a user
-    # service; our pidfiles do not cover it, so stop/start must manage it or
-    # an orphaned "gateway run" keeps holding gateway_state.json (stale fatal
-    # in the UI after an app-center restart).
-    systemctl_user_out "$@" >/dev/null 2>&1 || true
 }
 
 reap_gateway() {
@@ -222,17 +239,22 @@ start_process() {
         printf 'FEISHU_GROUP_POLICY=open\n' >> "${HERMES_HOME_DIR}/.env"
     fi
 
-    # fnOS-port: seed NAS-resident gateway defaults (idempotent): watchdog
-    # tolerance for busy NAS hosts + P2 unmanaged_idle_exit_seconds=0 (the
-    # desktop default reaps an unmanaged gateway after 600s idle, wrong on NAS).
+    # fnOS-port 0.22.7.1: seed config/persona FIRST. This block used to run
+    # before seed_config, so on a fresh install (no config.yaml yet) the NAS
+    # gateway defaults were silently skipped until the SECOND restart.
+    seed_config
+    seed_persona
+
+    # Seed NAS-resident gateway defaults (idempotent): watchdog tolerance for
+    # busy NAS hosts + unmanaged_idle_exit_seconds=0 (the desktop default reaps
+    # an unmanaged gateway after 600s idle, wrong on a NAS).
     if [ -f "${HERMES_HOME_DIR}/config.yaml" ]; then
         grep -q "^gateway:" "${HERMES_HOME_DIR}/config.yaml" || printf '\ngateway:\n' >> "${HERMES_HOME_DIR}/config.yaml"
         for kv in "loop_watchdog_max_strikes: 8" "unmanaged_idle_exit_seconds: 0"; do
-            grep -q "${kv%%:*}" "${HERMES_HOME_DIR}/config.yaml" || sed -i "/^gateway:$/a\  ${kv}" "${HERMES_HOME_DIR}/config.yaml" 2>/dev/null
+            grep -qE "^[[:space:]]*${kv%%:*}[[:space:]]*:" "${HERMES_HOME_DIR}/config.yaml" || \
+                sed -i "/^gateway:$/a\  ${kv}" "${HERMES_HOME_DIR}/config.yaml" 2>/dev/null
         done
     fi
-    seed_config
-    seed_persona
 
     local port=$(cat "${HTTP_PORT_FILE}" 2>/dev/null)
     if [ -z "${port}" ] || ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
@@ -253,14 +275,13 @@ start_process() {
     if [ -n "${node}" ]; then
         export HERMES_NODE="${node}"
     fi
-    # engine key for the 8080 worker (written by install_callback when readable)
-    # fnOS-port 0.22.7.2: actually read the file; the old branch only tested
-    # existence and exported the placeholder, so engine_key never took effect.
-    ENGINE_KEY=""
-    if [ -f "${APP_HOME}/engine_key" ]; then
-        ENGINE_KEY=$(head -c 4096 "${APP_HOME}/engine_key" | tr -d '\r\n')
+    # fnOS-port 0.22.7.1: engine key for the resident 8080 worker, written by
+    # install_callback. The old line exported a hard-coded placeholder, so the
+    # extracted key never reached the process. seed_config also writes it into
+    # config.yaml (the path the dashboard actually reads for custom providers).
+    if [ -s "${APP_HOME}/engine_key" ]; then
+        export OPENAI_API_KEY="$(head -n 1 "${APP_HOME}/engine_key" | tr -d '\r\n')"
     fi
-    export OPENAI_API_KEY="${OPENAI_API_KEY:-${ENGINE_KEY:-sk-local-123}}"
 
     ( cd "${TRIM_APPDEST}/src" && \
       exec "${TRIM_APPDEST}/python314/bin/python3.14" -m hermes_cli.main dashboard \
@@ -277,15 +298,30 @@ start_process() {
         sleep 1
     done
     if [ "${ready}" != "1" ]; then
-        # fnOS-port 0.22.7.2: a failed start must not report success (fnOS UI
-        # showed a healthy app with nothing listening).
-        log_msg "dashboard did not bind port ${port} in 40s"
+        # fnOS-port 0.22.7.1: no more false green. Previously we logged the
+        # failure, started the proxy anyway and returned 0, so the app center
+        # reported "running" on a dead service.
+        log_msg "dashboard did not bind port ${port} in 40s -> start FAILED"
+        rm -f "${DASH_PID_FILE}"
         return 1
     fi
 
     ( exec /usr/bin/python3 \
         "${TRIM_APPDEST}/sock_proxy.py" "${SOCK_PATH}" "${port}" "/app/hermes-si" >> "${LOG_FILE}" 2>&1 ) &
     printf "%s" "$!" > "${PROXY_PID_FILE}"
+
+    # A live proxy process is not proof the app is reachable: wait for the
+    # gateway unix socket before declaring success.
+    local sock_ready=0
+    for i in $(seq 1 20); do
+        if [ -S "${SOCK_PATH}" ]; then sock_ready=1; break; fi
+        sleep 0.5
+    done
+    if [ "${sock_ready}" != "1" ]; then
+        log_msg "proxy did not create ${SOCK_PATH} -> start FAILED"
+        stop_process
+        return 1
+    fi
 
     printf "%s" "$$" > "${PID_FILE}"
     return 0
@@ -318,17 +354,15 @@ stop_process() {
 }
 
 status() {
-    if running; then
-        # fnOS-port 0.22.7.2: pidfiles alone are false-green; require the
-        # dashboard to actually answer HTTP on its current port.
-        local port
-        port=$(cat "${HTTP_PORT_FILE}" 2>/dev/null)
-        if [ -n "${port}" ]; then
-            curl -s -m 3 -o /dev/null "http://127.0.0.1:${port}/" 2>/dev/null || return 1
-        fi
-        return 0
+    # fnOS-port 0.22.7.1: pidfiles alone used to report "running" even when
+    # the dashboard never bound its port or the proxy never created the socket.
+    running || return 1
+    [ -S "${SOCK_PATH}" ] || return 1
+    local port=$(cat "${HTTP_PORT_FILE}" 2>/dev/null)
+    if [ -n "${port}" ]; then
+        ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$" || return 1
     fi
-    return 1
+    return 0
 }
 
 case $1 in
