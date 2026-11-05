@@ -89,3 +89,39 @@ verify.py L0 asserts all four fingerprints.
 - **根因**：build-main.sh P6c 把 `out/tui/` 整目录拷进 `hermes_cli/tui_dist/`，产物 `dist/entry.js` 被嵌了一层；`main_tui_launch._find_bundled_tui` 只认 `tui_dist/entry.js` 顶层。后果=新装用户 CHAT 静默降级到 ui-tui **源码构建**路径（需 node+npm+联网重编），离线新装聊天必挂。**已发布的 0.22.5.7 同带此缺陷**（NAS 本机无恙只因运行时目录是开发期部署带的 entry.js）。
 - **上游正确语义**（scripts/build/agent.py plant_surfaces）：`tui/dist/*` 内容平铺进 `tui_dist/`，package.json 并列。build-main.sh P6c 已改平铺+断言 entry.js 存在；verify.py 新增 `L0.tui-bundled-entry` 静态断言（此前 45 项全绿仍漏包，因 verify 从不做包体 tui 布局检查）。
 - VM 验证顺序：VM 后端已被用户重启恢复；0.22.6.1 VM 装成后 tier5 聊天端到端（补 entry.js 后）state.db 实锤 `assistant='vmcheckE…'`；0.22.6.2 重打包 md5 8296cfa708bf48a2776d52436be9cdbd，verify ALL-PASS 143s，VM 覆盖安装+tier6（sqlite 断言版）进行中。
+
+## 2026-11-05 P0-13：点「重启网关」后 UI 永远停在「正在重启网关」（7.4 待实测）
+
+现象：点击后网关实际已重启成功（端口、会话都正常），但 dashboard 的 action 徽标一直转圈；`GET /api/actions/gateway-restart/status` 恒返回 `running: true`，刷新页面才恢复。这不是偶发，是移植层架构与上游重启语义冲突导致的必现。
+
+证据链（内核 v0.22.7，均可在 app.tgz 内 `src/` 复核）：
+
+1. `src/hermes_cli/web_routers/actions.py:424-439`：`exit_code = proc.poll()`；`running = exit_code is None`。UI 的唯一判据是 **gateway-restart 这个 action 子进程还活着没有**，与网关自身死活无关。
+2. `src/hermes_cli/web_server.py:712` `_spawn_gateway_restart()` 派发 `hermes gateway restart [--interrupt]`，**没有** `--detach`。
+3. `src/hermes_cli/gateway.py` `_cmd_restart()`（约 5470 起）：fnOS 单监护移除了 systemd-user unit → `_installed_service_kind_for()`（4987）只在 unit 存在时返回 `"systemd"`，故返回 None → service-call / linger 早退分支全部跳过 → 落到 manual fallback：`stop_profile_gateway()` 后调 `start_restart_replacement(args, force=...)`。
+4. `src/hermes_cli/gateway_supervised_restart.py:138-149`：
+
+   ```python
+   if getattr(args, "detach", False):
+       sys.exit(start_detached_replacement(gw.get_hermes_home(), force=force))
+   gw.run_gateway(verbose=0, force=force)
+   ```
+
+   不带 `--detach` 时 **网关就跑在这个 action 子进程里**，永不退出 → `proc.poll()` 永远 None → UI 永久转圈。该文件模块注释原文即：「In the foreground that caller became the long-lived gateway it only meant to restart」。
+5. 上游本来为这个场景留了开关：`src/hermes_cli/subcommands/gateway.py:152` 的 `--detach` help 原文 «… used by apps that run the restart as a short-lived client»。`gateway_runtime_start.py:101` `start_detached_replacement()` → `spawn_unmanaged_gateway()` 后台起网关 → 返回 0 → `sys.exit(0)` → action 子进程退出 → UI 轮询结束。fnOS dashboard 正是 short-lived client。
+6. `gateway_runtime_start.py` 的 `DAEMON_STRIPPED_ENV` 明确把 `INVOCATION_ID` 从守护进程环境里剔除，避免守护进程自认 systemd 托管。
+
+**不采纳**「`cmd/main` 里 export `INVOCATION_ID` + SIGUSR1 / exit 75 交回 systemd 拉起」：
+
+- `gateway/control_socket.py` 的 `identify` 会因 `INVOCATION_ID` 把网关报成 supervisor=`systemd`，于是 `_cmd_restart` 走 `restart_externally_supervised_gateway()`（`gateway_supervised_restart.py:72`）：SIGUSR1 drain 后 `_wait_for_supervised_gateway_replacement()` 等 15s 新 PID。
+- fnOS 没有真实 systemd unit / KeepAlive；`cmd/process_supervisor.sh` 是 owner-death reaper（只收尸，不拉起）。15s 等不到新 PID → 打印 «Supervisor did not relaunch the gateway» → `sys.exit(1)`，**网关真死**。
+- 即该方案把「UI 卡住」的显示问题换成「网关起不来」的可用性事故，且与上游 `DAEMON_STRIPPED_ENV` 的设计相反。
+
+修法：`gateway-restart-detach.patch`，在 `_spawn_gateway_restart()` 的 subcommand 追加 `--detach`。只改 payload 内 Python 源码（port-patches 打进 app.tgz），不动 `cmd/main`、不动封装、不与 0.22.7.3 制品耦合。`verify.py` 新增 `L0.gateway-restart-detach` 静态断言。
+
+状态：**仅静态验证，未出包、未实机验证**。已验证：patch 对内核 v0.22.7 源码 clean apply（含与 `restart-coalesce-alive.patch` 两种应用顺序）、`py_compile` 通过、`--detach` 为 `gateway restart` 合法 flag。待 0.22.7.4-test 包实机回归清单：
+
+- 点重启后 action 状态数秒内变 `running: false` / `exit_code: 0`；UI 自动恢复，无需刷新；
+- 网关新 PID ≠ 旧 PID、API 端口可访问、Web/WS 与飞书会话正常；
+- 连点两次不产生双主（`gateway.lock` 唯一 owner），`--interrupt` 强制路径仍生效；
+- action 日志出现 `✓ Started the gateway in the background`，且无 `Refusing...` / `Supervisor did not relaunch`。

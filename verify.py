@@ -258,6 +258,7 @@ def tier0():
     ok('L0.host-record-cleanup', 'gateway-locks/' in main_cmd)
     ws = (t0 / 'src' / 'hermes_cli' / 'web_server.py').read_text(errors='ignore')
     ok('L0.restart-coalesce-alive', 'child_alive' in ws and 'P0-10' in ws)
+    ok('L0.gateway-restart-detach', 'subcommand += ["--detach"]' in ws and 'P0-13' in ws)
     la = (t0 / 'src' / 'hermes_cli' / '_launchers.py').read_text(errors='ignore')
     ok('L0.launcher-bind-interpreter',
        'P0-12' in la and 'python = python or Path(sys.executable)' in la
