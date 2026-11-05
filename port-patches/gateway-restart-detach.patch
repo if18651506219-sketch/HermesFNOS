@@ -1,0 +1,16 @@
+--- a/src/hermes_cli/web_server.py
++++ b/src/hermes_cli/web_server.py
+@@ -710,6 +710,13 @@
+     # drain (D6 of the safe-shutdown plan, 19b26244046); a config-save auto-restart is not, and its
+     # child refuses while sessions are live.
+     subcommand = _gateway_mod._gateway_subcommand(profile, "restart") + ["--interrupt"] * interrupt
++    # fnOS-port 0.22.7.4 P0-13: the single-supervisor port removed the
++    # systemd-user unit, so _cmd_restart falls through to its manual fallback.
++    # Without --detach, start_restart_replacement() calls run_gateway() IN THIS
++    # action child: it never exits, proc.poll() stays None, and the dashboard
++    # polls "restarting gateway" forever. Upstream's short-lived-client path
++    # (gateway restart --detach -> start_detached_replacement) fixes exactly this.
++    subcommand += ["--detach"]
+     existing = _gateway_mod._ACTION_PROCS.get("gateway-restart")
+     if existing is not None and existing.poll() is None:
+         existing_command = _gateway_mod._ACTION_COMMANDS.get("gateway-restart")
