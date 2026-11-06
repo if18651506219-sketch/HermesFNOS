@@ -5,10 +5,16 @@ Writes app/src/install-stamp.json so hermes_cli.version_info resolves
 base_version instead of "unknown" (dashboard vunknown fix).
 Must be re-run on every kernel bump with the new kernel version.
 
-fnOS-port 0.22.7.3: COMMIT/COMMIT_DATE/KERNEL are a single triple. Passing a
-kernel that does not match the stamped commit used to silently produce a
-package claiming "0.22.7" while carrying the 0.22.6 commit (verify.py L0 only
-checked that the commit was non-empty). Refuse that combination up front.
+fnOS-port 0.22.7.3 (still applies at 0.23.0.1): COMMIT/COMMIT_DATE/KERNEL
+are a single triple. Passing a kernel that does not match the stamped commit
+used to silently produce a package claiming "0.22.7" while carrying the
+0.22.6 commit (verify.py L0 only checked that the commit was non-empty).
+Refuse that combination up front.
+
+The 0.23.0 bump forgot that `manifest version` is the THIRD leg of the
+triple: KERNEL was changed here while manifest stayed at 0.22.7.3, so
+L0.version-consistency would fail and repack_fpk.py would refuse the build.
+Always run scripts/verify_kernel_bump.py before packaging.
 
 usage: stamp_version.py <pkg_dir> <kernel_ver> <fnos_ver>
 """

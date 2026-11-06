@@ -19,6 +19,13 @@ Two coupled jobs, both REQUIRED before an fpk may ship:
    names through every file that references them (bundles + index.html).
    Idempotent: already-renamed dists are detected and skipped.
 
+Both stages are safe to re-run. fnOS-port 0.23.0.1: the preload stage used to
+`assert fixed + already == 1`, which blows up on a SECOND run of a dist with
+more than one modulepreload helper (`hits=1+1`) and on 0.23.0's larger bundle
+set. What actually matters is that AT LEAST ONE helper was found and that no
+old-shape helper survives (checked in the invariants stage), not that the
+count happens to be exactly one.
+
 usage: fix_web_dist.py <web_dist_dir> <prefix>
 """
 import re
@@ -38,17 +45,20 @@ js_files = sorted(assets.glob("*.js"))
 assert js_files, "no js assets"
 
 # --- 1. preload helper ---------------------------------------------------
+# Count FILES, not substitutions: one bundle may carry more than one helper.
 fixed = already = 0
 for f in js_files:
     data = f.read_bytes()
     new, n = HELPER_OLD.subn(lambda m: m.group(1) + ("`%s/`" % prefix).encode() + m.group(3), data)
     if n:
         f.write_bytes(new)
-        fixed += n
+        fixed += 1
     elif HELPER_NEW.search(data):
         already += 1
-assert fixed + already == 1, f"preload helper hits={fixed}+{already} (expected exactly 1)"
-print(f"preload-helper: fixed={fixed} already-fixed={already}")
+assert fixed + already >= 1, (
+    f"preload helper hits={fixed}+{already}: no modulepreload helper found "
+    f"(upstream bundle shape changed) — refusing a dist that would still 404")
+print(f"preload-helper: fixed={fixed} already-fixed={already} (re-run safe)")
 
 # --- 2. cache-bust rename + reference propagation ------------------------
 renamed = [f for f in js_files if SUFFIX in f.name.encode()]
@@ -90,7 +100,10 @@ for f in alljs + [dist / "index.html"]:
         if (b"-" in name or b".min." in name) and name not in alive and b"node" not in m.group(0):
             refs_bad.append((f.name, name))
 helper_ok = any(HELPER_NEW.search(f.read_bytes()) for f in alljs)
-leftover = sum(len(HELPER_OLD.search(f.read_bytes()) or b"") for f in alljs)
+# fnOS-port 0.23.0.1: `len(HELPER_OLD.search(...) or b"")` raised
+# TypeError: object of type 're.Match' has no len() whenever a stale helper
+# survived — the failure path crashed instead of reporting exit 2. Count hits.
+leftover = sum(1 for f in alljs if HELPER_OLD.search(f.read_bytes()))
 print("files:", len(alljs), "helper-ok:", helper_ok, "helper-old-left:", leftover,
       "dangling-refs:", refs_bad[:6])
 sys.exit(0 if (helper_ok and not leftover and not refs_bad) else 2)

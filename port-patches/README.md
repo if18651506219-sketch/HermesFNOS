@@ -1,13 +1,36 @@
 # port-patches (runtime src patches)
 
-Payload src patches applied to the official kernel tree after extracting app.tgz
-(patch -p1 inside the payload root, before stamp_version.py / fnpack):
+Payload src patches applied to the official kernel tree before
+`stamp_version.py` / fnpack. All 8 patches carry `a/src/...` paths, so the strip
+level depends on **which tree you are patching** — both were verified against
+upstream v0.23.0:
 
-- adapter-create-retry.patch — gateway/run_adapters.py: adapter creation failed -> retry once in 3s
-- feishu-video-shrink.patch — plugins/platforms/feishu/adapter.py: >30MB videos re-encoded to ~26MB before upload
+| tree layout | files on disk | command |
+| --- | --- | --- |
+| fnOS payload root (has `src/`) | `src/hermes_cli/web_server.py` | `patch -p1` |
+| upstream kernel tree (flat: `hermes_cli/` at repo root, no `src/`) | `hermes_cli/web_server.py` | `patch -p2` |
 
-sock_proxy keepalive and cmd/main watchdog seed are tracked directly in repo files.
-verify.py L0 asserts all four fingerprints.
+`-p2` strips both `a/` and `src/`; using it on a payload tree (or `-p1` on a
+flat upstream tree) silently targets the wrong path. `BUILD-NOTES-build-023.md`
+says "-p2" because the 0.23 build replays patches on the upstream tree before
+assembling the payload. `scripts/verify_kernel_bump.py --kernel-src <tree>`
+dry-runs every patch at both strip levels so a kernel bump cannot silently
+ship unapplied fixes.
+
+Current inventory (`verify.py` L0 asserts each fingerprint; this file's older
+"all four fingerprints" line was stale):
+
+- `adapter-create-retry.patch` — gateway/run_adapters.py: adapter creation failed -> retry once in 3s
+- `downloader-read-guard.patch` — pm/downloader.py: guarded reads with their own timeout
+- `feishu-video-shrink.patch` — plugins/platforms/feishu/adapter.py: >30MB videos re-encoded to ~26MB before upload
+- `gateway-restart-detach.patch` — hermes_cli/web_server.py: append `--detach` (P0-13)
+- `launcher-bind-interpreter.patch` — hermes_cli/_launchers.py: bind packaged interpreter (P0-12)
+- `restart-coalesce-alive.patch` — hermes_cli/web_server.py: only coalesce while child is alive (P0-10)
+- `skill-lock-perm.patch` — tools/skill_usage.py: self-heal unwritable skill locks
+- `stale-lock-selfheal.patch` — gateway/run_bootstrap.py: clear stale gateway.lock
+
+`sock_proxy` keepalive and `cmd/main` watchdog/seed logic are tracked directly
+in repo files (not as patches).
 
 ## fnos 0.22.5.3 distribution fixes (2026-10-29, user P0 audit doc)
 
@@ -125,3 +148,10 @@ verify.py L0 asserts all four fingerprints.
 - 网关新 PID ≠ 旧 PID、API 端口可访问、Web/WS 与飞书会话正常；
 - 连点两次不产生双主（`gateway.lock` 唯一 owner），`--interrupt` 强制路径仍生效；
 - action 日志出现 `✓ Started the gateway in the background`，且无 `Refusing...` / `Supervisor did not relaunch`。
+
+## 0.23.0 内核升级（2026-11-06 复核）
+
+- 8 个补丁在上游 v0.23.0（release commit `2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19`）源码上按 `-p1` / `-p2` 两种布局**全部干净重放**；`restart-coalesce-alive.patch` + `gateway-restart-detach.patch` 叠加后逻辑自洽、`py_compile` 通过。`--detach` 在 0.23 仍是 `gateway restart` 的合法 flag（`subcommands/gateway.py:152`、`gateway_supervised_restart.py:146`）。
+- **新增风险**：0.23.0 的 `_cmd_restart` 在 `start_restart_replacement()` 之前加了 `gateway_declares_external_supervisor()` 和 `refuse_restart_of_service_managed_gateway()` 两道护栏。若网关自报 systemd，前者会 SIGUSR1 drain 后等 15s 新 PID，等不到就 `exit 1` 且明确拒绝拉起替代网关；此时 `--detach` **根本走不到**。fnOS 从 systemd unit 起应用，`INVOCATION_ID` 会经 dashboard 一路继承到网关，`_detect_supervisor()` 读到此变量即返回 `systemd` —— 这正是上一节「不采纳 export INVOCATION_ID」所分析路径的镜像风险，只是这次是**意外继承**而非主动 export。
+- **修法 P0-14**（落在 `cmd/main`，不是 payload 补丁）：启动 dashboard 的子 shell 里 `unset` 掉 `INVOCATION_ID` / `JOURNAL_STREAM` / `NOTIFY_SOCKET` / `WATCHDOG_*` 及 launchd 标记，让 unmanaged 网关自报 `manual`。依据上游 `hermes_cli/gateway_runtime_start.py::DAEMON_STRIPPED_ENV` 的同名处理。`verify.py` 新增 `L0.no-systemd-supervisor-marker` 断言。
+- **仍需实机**：点「重启网关」，确认走 `--detach` 分支、action 数秒内结束、网关新 PID 可用；若日志出现 `Restarting externally-supervised gateway` 或 `Supervisor did not relaunch`，说明护栏没生效。
