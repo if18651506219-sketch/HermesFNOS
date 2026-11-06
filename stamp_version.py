@@ -18,9 +18,9 @@ import sys
 from datetime import datetime, timezone
 
 # Update these THREE together on every upstream kernel bump.
-KERNEL = "0.22.7"
-COMMIT = "b200f5bc60e31588ba2cb60e288029c4a54ba5fa"  # upstream v0.22.7 tag
-COMMIT_DATE = 1793742781
+KERNEL = "0.23.0"
+COMMIT = "2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19"  # upstream v0.23.0 tag
+COMMIT_DATE = 1793908658
 
 
 def main():
