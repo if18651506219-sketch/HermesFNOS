@@ -259,6 +259,18 @@ def tier0():
     ws = (t0 / 'src' / 'hermes_cli' / 'web_server.py').read_text(errors='ignore')
     ok('L0.restart-coalesce-alive', 'child_alive' in ws and 'P0-10' in ws)
     ok('L0.gateway-restart-detach', 'subcommand += ["--detach"]' in ws and 'P0-13' in ws)
+    # 0.23.0 P0-14: fnOS starts the app under a systemd unit. Without stripping
+    # the inherited markers, _detect_supervisor() answers "systemd" and the new
+    # external-supervisor guard drains the gateway via SIGUSR1, waits 15s for a
+    # KeepAlive replacement that fnOS does not have, then exits 1. The gateway
+    # stays down and --detach is never reached.
+    # Match the actual statement, not a commented-out copy: a bare `'unset
+    # INVOCATION_ID' in main_cmd` check would still pass on `# unset ...`.
+    guard = re.search(r'^\s*unset\s+INVOCATION_ID\s+JOURNAL_STREAM\s+NOTIFY_SOCKET',
+                      main_cmd, re.M)
+    ok('L0.no-systemd-supervisor-marker',
+       'P0-14' in main_cmd and bool(guard) and 'WATCHDOG_USEC' in main_cmd,
+       'cmd/main must strip systemd supervisor markers before spawning dashboard')
     la = (t0 / 'src' / 'hermes_cli' / '_launchers.py').read_text(errors='ignore')
     ok('L0.launcher-bind-interpreter',
        'P0-12' in la and 'python = python or Path(sys.executable)' in la

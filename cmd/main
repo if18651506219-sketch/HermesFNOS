@@ -1,5 +1,5 @@
 #!/bin/bash
-# Hermes SI (hermes-agent v0.22.3) fpk lifecycle: native web dashboard behind
+# Hermes SI (hermes-agent v0.23.0) fpk lifecycle: native web dashboard behind
 # the fnOS unified gateway (unix socket + prefix/path-rewriting proxy).
 # The dashboard is the UPSTREAM UI (hermes dashboard --skip-build); no frontend
 # modifications. Runtime: bundled python3.14 + packaged venv + packaged source.
@@ -283,9 +283,26 @@ start_process() {
         export OPENAI_API_KEY="$(head -n 1 "${APP_HOME}/engine_key" | tr -d '\r\n')"
     fi
 
-    ( cd "${TRIM_APPDEST}/src" && \
+    # fnOS-port 0.23.0.1 P0-14: fnOS launches this app from a systemd unit, so
+    # INVOCATION_ID / JOURNAL_STREAM / NOTIFY_SOCKET / WATCHDOG_* are inherited
+    # by the dashboard AND by the gateway it spawns. In kernel 0.23.0
+    # gateway/control_socket.py::_detect_supervisor() reads INVOCATION_ID and
+    # answers "systemd"; the new _cmd_restart guards then treat the gateway as
+    # externally supervised, drain it via SIGUSR1 and wait up to 15s for a
+    # KeepAlive replacement. fnOS has NO such respawn (single-supervisor is the
+    # dashboard; process_supervisor.sh is an owner-death reaper), so the gateway
+    # would stay down and the `--detach` short-lived-client path (P0-13) would
+    # never even be reached. Strip the markers in this subshell so the unmanaged
+    # gateway self-identifies as "manual". Mirrors upstream DAEMON_STRIPPED_ENV
+    # in hermes_cli/gateway_runtime_start.py (same rationale, verbatim comment).
+    (
+      cd "${TRIM_APPDEST}/src" || exit 1
+      unset INVOCATION_ID JOURNAL_STREAM NOTIFY_SOCKET WATCHDOG_USEC WATCHDOG_PID \
+            XPC_SERVICE_NAME LAUNCHD_SOCKET HERMES_LAUNCHD_LABEL \
+            HERMES_SUPERVISED_CHILD HERMES_GATEWAY_EXTERNAL_SUPERVISOR
       exec "${TRIM_APPDEST}/python314/bin/python3.14" -m hermes_cli.main dashboard \
-        --skip-build --no-open --host 127.0.0.1 --port "${port}" >> "${LOG_FILE}" 2>&1 ) &
+        --skip-build --no-open --host 127.0.0.1 --port "${port}" >> "${LOG_FILE}" 2>&1
+    ) &
     printf "%s" "$!" > "${DASH_PID_FILE}"
 
     # wait for the dashboard to bind, then attach the gateway unix socket
