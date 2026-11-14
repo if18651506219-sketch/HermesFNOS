@@ -1,6 +1,6 @@
 --- a/src/pm/downloader.py
 +++ b/src/pm/downloader.py
-@@ -48,6 +48,33 @@
+@@ -54,6 +54,33 @@
  _UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) hermes-pm/1.0", "Accept-Encoding": "identity"}
  _LOOPBACK = ("http://127.0.0.1:", "http://localhost:", "http://[::1]:")
  _CHUNK = 1 << 20  # read/write block, also the minimum range size
@@ -34,7 +34,8 @@
  _CHECKPOINT_SECONDS = 5.0
  
  
-@@ -534,7 +561,7 @@
+@@ -583,7 +610,7 @@
+             position = start
              while position < end:
                  if self._paused.is_set() or stop.is_set():
                      return
@@ -43,8 +44,7 @@
                  if not chunk:
                      raise http.client.IncompleteRead(b"", end - position)
                  stream.write(chunk)
-@@ -542,7 +569,7 @@
-                 position += len(chunk)
+@@ -591,7 +618,7 @@
                  # A complete checkpoint must not bypass the body-bounds check
                  # if the process dies between the last write and EOF validation.
 -                if position == end and response.read(1):
@@ -52,12 +52,12 @@
                      raise _RangeError("range body exceeds its declared bounds")
                  record(start, position)
  
-@@ -650,7 +677,7 @@
+@@ -702,7 +729,7 @@
                  while True:
                      if self._paused.is_set():
                          raise DownloadPaused(source.url)
--                    chunk = response.read(_CHUNK)
-+                    chunk = _read_guarded(response, _CHUNK)
+-                    chunk = response.read(_CHUNK if limit is None else min(_CHUNK, limit - position + 1))
++                    chunk = _read_guarded(response, _CHUNK if limit is None else min(_CHUNK, limit - position + 1))
                      if not chunk:
                          break
-                     stream.write(chunk)
+                     if limit is not None and position + len(chunk) > limit:

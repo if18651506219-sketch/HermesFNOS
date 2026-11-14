@@ -1,6 +1,6 @@
 --- a/src/plugins/platforms/feishu/adapter.py
 +++ b/src/plugins/platforms/feishu/adapter.py
-@@ -3685,6 +3685,61 @@
+@@ -3690,6 +3690,61 @@
          except Exception:
              return 0
  
@@ -62,7 +62,7 @@
      async def _send_uploaded_file_message(
          self, *, chat_id: str, file_path: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
          caption: Optional[str] = None, file_name: Optional[str] = None, outbound_message_type: str = "file",
-@@ -3695,6 +3750,18 @@
+@@ -3700,6 +3755,18 @@
              return SendResult(success=False, error=f"File not found: {file_path}")
  
          display_name = file_name or os.path.basename(file_path)
@@ -81,10 +81,10 @@
          upload_file_type, resolved_message_type = self._resolve_outbound_file_routing(
              file_path=display_name, requested_message_type=outbound_message_type,
          )
-@@ -3744,6 +3811,12 @@
+@@ -3749,6 +3816,12 @@
          except Exception as exc:
-             logger.error("[Feishu] Failed to send file %s: %s", file_path, exc, exc_info=True)
-             return SendResult(success=False, error=str(exc))
+             logger.error("[Feishu] Failed to send file %s: %s", file_path, (shown := describe_proxy_error(exc, env_proxy_for_redaction(_onboard_open_base_url(self._domain_name)))) or exc, exc_info=not shown)
+             return SendResult(success=False, error=shown or str(exc))
 +        finally:
 +            if shrunk_path:
 +                try:
@@ -94,3 +94,4 @@
  
      async def _send_uploaded_key(
          self, *, chat_id: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]], caption: Optional[str],
+
